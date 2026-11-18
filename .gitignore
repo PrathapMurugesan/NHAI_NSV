@@ -30,15 +30,15 @@ venv/
 ENV/
 env/
 
-# Data and large output files
-output/
-bronze/
-data/
+# Data and large output files (anchored to root only)
+/output/
+/bronze/
+/data/
 *.parquet
 *.xlsx
 
 # Logs
-logs/
+/logs/
 *.log
 
 # IDE and OS
