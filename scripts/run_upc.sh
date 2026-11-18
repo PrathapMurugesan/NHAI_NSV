@@ -35,7 +35,7 @@ fi
 
 # Resolve per-run partition paths for the current UPC
 SILVER_UPC_ROOT="${SILVER_S3_ROOT}/Zone=${ZONE}/Phase=${PHASE}/Cycle=${CYCLE}/UPC=${UPC}"
-SILVER_DATA_OUTPUT_DIR="${SILVER_UPC_ROOT}/data"
+SILVER_DATA_OUTPUT_DIR="${SILVER_UPC_ROOT}/dlm_kpi_new"
 LOG_DIR="${WORK_DIR}/logs"
 RUN_LOG_S3="${LOG_DIR}/${UPC}_P${PHASE}_C${CYCLE}.log"
 

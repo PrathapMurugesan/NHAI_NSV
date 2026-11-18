@@ -21,15 +21,25 @@ logger = get_logger(__name__)
 class TableWriter:
     """
     Manages persistence of Silver/DLM tables to Parquet on local storage or AWS EBS/S3.
+    Saves tables as <output_dir>/dlm_kpi_new/<table_name>.parquet.
     """
 
     def __init__(self, output_dir: str):
+        clean_dir = output_dir.rstrip("/")
+        if not clean_dir.endswith("dlm_kpi_new"):
+            if output_dir.startswith("s3://"):
+                output_dir = f"{clean_dir}/dlm_kpi_new"
+            else:
+                output_dir = os.path.join(clean_dir, "dlm_kpi_new")
         self.output_dir = output_dir
         if not output_dir.startswith("s3://"):
             os.makedirs(self.output_dir, exist_ok=True)
 
     def get_table_path(self, table_name: str) -> str:
-        return os.path.join(self.output_dir, table_name)
+        fname = f"{table_name}.parquet"
+        if self.output_dir.startswith("s3://"):
+            return f"{self.output_dir}/{fname}"
+        return os.path.join(self.output_dir, fname)
 
     def write_table(
         self,
@@ -47,12 +57,8 @@ class TableWriter:
             logger.warning("DataFrame for %s is None; skipping write", table_name)
             return 0
 
-        tbl_path = self.get_table_path(table_name)
-        is_s3 = tbl_path.startswith("s3://")
-        if not is_s3:
-            os.makedirs(tbl_path, exist_ok=True)
-
-        parquet_file = f"{tbl_path}/data.parquet" if is_s3 else os.path.join(tbl_path, "data.parquet")
+        parquet_file = self.get_table_path(table_name)
+        is_s3 = parquet_file.startswith("s3://")
 
         clean_df = df.copy()
         # Ensure partition metadata exists

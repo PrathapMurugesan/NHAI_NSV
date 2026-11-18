@@ -223,6 +223,7 @@ class PipelineSettings:
                 f"Phase={self.phase}",
                 f"Cycle={self.cycle}",
                 f"UPC={self.upc}",
+                "dlm_kpi_new",
             )
             self.validation_report_dir = os.path.join(local_out, "validation_reports")
             self.exports_dir = os.path.join(local_out, "exports")
@@ -234,6 +235,7 @@ class PipelineSettings:
                     f"Phase={self.phase}",
                     f"Cycle={self.cycle}",
                     f"UPC={self.upc}",
+                    "dlm_kpi_new",
                 )
             if self.work_dir:
                 self.validation_report_dir = os.path.join(self.work_dir, "validation_reports")
