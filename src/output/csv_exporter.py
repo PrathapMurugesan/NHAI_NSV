@@ -59,13 +59,11 @@ def export_to_csv(
                     else (None if pd.isna(v) else v)
                 )
 
-        file_path = os.path.join(export_dir, f"{tbl}.csv")
+        file_path = f"{export_dir}/{tbl}.csv" if is_s3 else os.path.join(export_dir, f"{tbl}.csv")
         if is_s3:
-            import pyarrow.fs as pafs
-            fs, path_in_fs = pafs.FileSystem.from_uri(file_path)
+            from src.common.fs_utils import write_file_bytes
             csv_bytes = df.to_csv(index=False).encode('utf-8')
-            with fs.open_output_stream(path_in_fs) as f_out:
-                f_out.write(csv_bytes)
+            write_file_bytes(file_path, csv_bytes)
             n_back = len(df)
             status = 'OK'
         else:
@@ -82,12 +80,10 @@ def export_to_csv(
         logger.debug("CSV exported: %s (%d rows)", file_path, n_back)
 
     index_df = pd.DataFrame(csv_index)
-    index_path = os.path.join(export_dir, "_index.csv")
+    index_path = f"{export_dir}/_index.csv" if is_s3 else os.path.join(export_dir, "_index.csv")
     if is_s3:
-        import pyarrow.fs as pafs
-        fs, path_in_fs = pafs.FileSystem.from_uri(index_path)
-        with fs.open_output_stream(path_in_fs) as f_out:
-            f_out.write(index_df.to_csv(index=False).encode('utf-8'))
+        from src.common.fs_utils import write_file_bytes
+        write_file_bytes(index_path, index_df.to_csv(index=False).encode('utf-8'))
     else:
         index_df.to_csv(index_path, index=False)
 

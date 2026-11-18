@@ -111,11 +111,9 @@ def export_to_excel(
         xw.book.move_sheet('index', offset=-len(xw.book.sheetnames) + 1)
 
     if is_s3:
-        import pyarrow.fs as pafs
-        fs, path_in_fs = pafs.FileSystem.from_uri(output_path)
+        from src.common.fs_utils import write_file_bytes
         with open(tmp_file, 'rb') as f_in:
-            with fs.open_output_stream(path_in_fs) as f_out:
-                f_out.write(f_in.read())
+            write_file_bytes(output_path, f_in.read())
     else:
         shutil.copy(tmp_file, output_path)
 

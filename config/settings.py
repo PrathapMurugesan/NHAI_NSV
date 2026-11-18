@@ -278,66 +278,92 @@ class PipelineSettings:
         return settings
 
 
-from src.common.fs_utils import path_exists, list_dir, is_dir
+from src.common.fs_utils import path_exists, list_dir, is_dir, walk_files
 
 def find_latest_date_partition(base_path: str) -> Optional[str]:
     """Find the latest year=*/month=*/day=* partition in base_path."""
-    if not path_exists(base_path):
-        return None
     try:
         years = sorted([y for y in list_dir(base_path) if y.startswith("year=")], reverse=True)
         for y in years:
             yp = f"{base_path}/{y}" if base_path.startswith("s3://") else os.path.join(base_path, y)
-            if not is_dir(yp):
-                continue
             months = sorted([m for m in list_dir(yp) if m.startswith("month=")], reverse=True)
             for m in months:
                 mp = f"{yp}/{m}" if base_path.startswith("s3://") else os.path.join(yp, m)
-                if not is_dir(mp):
-                    continue
                 days = sorted([d for d in list_dir(mp) if d.startswith("day=")], reverse=True)
                 for d in days:
                     return f"{y}/{m}/{d}"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Direct traversal error in find_latest_date_partition: {e}")
+
+    # Fallback for S3 / nested structures: inspect objects under base_path
+    try:
+        import re
+        all_files = walk_files(base_path)
+        date_parts = set()
+        for f in all_files:
+            m = re.search(r"(year=\d+/month=\d+/day=\d+)", f)
+            if m:
+                date_parts.add(m.group(1))
+        if date_parts:
+            return sorted(date_parts, reverse=True)[0]
+    except Exception as e:
+        logger.debug(f"Regex fallback error in find_latest_date_partition: {e}")
+
     return None
 
 
 def find_deliverable_parent(base: str) -> str:
     """Find the directory containing Deliverable=* partitions."""
-    if not path_exists(base):
-        return base
     try:
         children = sorted(list_dir(base))
         if any(c.startswith("Deliverable=") for c in children):
             return base
         for child in children:
             child_path = f"{base}/{child}" if base.startswith("s3://") else os.path.join(base, child)
-            if is_dir(child_path):
-                found = find_deliverable_parent(child_path)
-                if found != child_path:
-                    return found
-                if any(gc.startswith("Deliverable=") for gc in list_dir(child_path)):
-                    return child_path
+            sub_children = list_dir(child_path)
+            if any(gc.startswith("Deliverable=") for gc in sub_children):
+                return child_path
+            found = find_deliverable_parent(child_path)
+            if found != child_path and any(gc.startswith("Deliverable=") for gc in list_dir(found)):
+                return found
     except Exception:
         pass
+
+    # Fallback: inspect actual files found under base
+    try:
+        all_files = walk_files(base)
+        for f in all_files:
+            if "Deliverable=Deliverable -" in f:
+                idx = f.find("Deliverable=Deliverable -")
+                return f[:idx].rstrip("/")
+    except Exception:
+        pass
+
     return base
 
 
 def find_lane_parent(base: str) -> Optional[str]:
     """Find the directory containing Lane=* partitions."""
-    if not path_exists(base):
-        return None
     try:
         children = sorted(list_dir(base))
         if any(c.startswith("Lane=") for c in children):
             return base
         for child in children:
             child_path = f"{base}/{child}" if base.startswith("s3://") else os.path.join(base, child)
-            if is_dir(child_path):
-                found = find_lane_parent(child_path)
-                if found:
-                    return found
+            found = find_lane_parent(child_path)
+            if found:
+                return found
     except Exception:
         pass
+
+    # Fallback: inspect actual files found under base
+    try:
+        all_files = walk_files(base)
+        for f in all_files:
+            if "/Lane=" in f:
+                idx = f.find("/Lane=")
+                return f[:idx]
+    except Exception:
+        pass
+
     return None

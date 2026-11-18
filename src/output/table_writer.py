@@ -52,7 +52,7 @@ class TableWriter:
         if not is_s3:
             os.makedirs(tbl_path, exist_ok=True)
 
-        parquet_file = os.path.join(tbl_path, "data.parquet")
+        parquet_file = f"{tbl_path}/data.parquet" if is_s3 else os.path.join(tbl_path, "data.parquet")
 
         clean_df = df.copy()
         # Ensure partition metadata exists
@@ -65,12 +65,10 @@ class TableWriter:
 
         # Handle existing data (replaceWhere)
         if is_s3:
-            import pyarrow.fs as pafs
-            fs, path_in_fs = pafs.FileSystem.from_uri(parquet_file)
-            file_info = fs.get_file_info(path_in_fs)
-            if file_info.type != pafs.FileType.NotFound:
+            from src.common.fs_utils import path_exists, read_parquet_df, write_parquet_df
+            if path_exists(parquet_file):
                 try:
-                    existing = pq.read_table(path_in_fs, filesystem=fs).to_pandas()
+                    existing = read_parquet_df(parquet_file)
                     mask = (
                         (existing.get('upc_code') == str(upc)) &
                         (existing.get('phase') == str(phase)) &
@@ -110,8 +108,8 @@ class TableWriter:
                 )
 
         if is_s3:
-            table = pa.Table.from_pandas(out_to_save, preserve_index=False)
-            pq.write_table(table, path_in_fs, filesystem=fs, compression='snappy')
+            from src.common.fs_utils import write_parquet_df
+            write_parquet_df(out_to_save, parquet_file)
         else:
             temp_file = parquet_file + ".tmp"
             out_to_save.to_parquet(temp_file, index=False, engine='pyarrow')

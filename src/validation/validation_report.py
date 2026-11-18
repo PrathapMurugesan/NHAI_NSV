@@ -65,16 +65,11 @@ def save_validation_report(
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     if is_s3:
-        import pyarrow.fs as pafs
-        fs, path_in_fs = pafs.FileSystem.from_uri(output_path)
+        from src.common.fs_utils import write_file_bytes, write_parquet_df
         if output_path.endswith('.parquet'):
-            import pyarrow as pa
-            import pyarrow.parquet as pq
-            table = pa.Table.from_pandas(val_df, preserve_index=False)
-            pq.write_table(table, path_in_fs, filesystem=fs)
+            write_parquet_df(val_df, output_path)
         else:
-            with fs.open_output_stream(path_in_fs) as f_out:
-                f_out.write(val_df.to_csv(index=False).encode('utf-8'))
+            write_file_bytes(output_path, val_df.to_csv(index=False).encode('utf-8'))
     elif output_path.endswith('.csv'):
         val_df.to_csv(output_path, index=False)
     elif output_path.endswith('.parquet'):
