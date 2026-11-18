@@ -12,16 +12,26 @@ if [ -f ".env" ]; then
     source .env
 fi
 
-# Override with positional arguments if provided
-ZONE="${1:-$ZONE}"
-PHASE="${2:-$PHASE}"
-CYCLE="${3:-$CYCLE}"
-BATCH_FILE="${4:-batches/upcs_4.txt}"
-DATA_ROOT="${5:-$DATA_ROOT}"
+# Allow passing batch file directly as first argument (e.g. ./scripts/run_batch.sh batches/upcs_1.txt)
+if [[ "$1" == *.txt ]] || [[ "$1" == *batches/* ]]; then
+    BATCH_FILE="$1"
+    DATA_ROOT="${2:-$DATA_ROOT}"
+    ZONE="${ZONE:-B}"
+    PHASE="${PHASE:-2}"
+    CYCLE="${CYCLE:-1}"
+else
+    # Standard positional arguments: [ZONE] [PHASE] [CYCLE] [BATCH_FILE] [DATA_ROOT]
+    ZONE="${1:-$ZONE}"
+    PHASE="${2:-$PHASE}"
+    CYCLE="${3:-$CYCLE}"
+    BATCH_FILE="${4:-${BATCH_FILE:-batches/upcs_1.txt}}"
+    DATA_ROOT="${5:-$DATA_ROOT}"
+fi
 
-if [ -z "$ZONE" ] || [ -z "$PHASE" ] || [ -z "$CYCLE" ] || [ -z "$BATCH_FILE" ]; then
-    echo "Usage: $0 [ZONE] [PHASE] [CYCLE] [BATCH_FILE] [DATA_ROOT]"
-    echo "Example: $0 B 2 1 batches/upcs_4.txt"
+if [ -z "$BATCH_FILE" ]; then
+    echo "Usage: $0 [BATCH_FILE] [DATA_ROOT]"
+    echo "   or: $0 [ZONE] [PHASE] [CYCLE] [BATCH_FILE] [DATA_ROOT]"
+    echo "Example: $0 batches/upcs_1.txt"
     exit 1
 fi
 
