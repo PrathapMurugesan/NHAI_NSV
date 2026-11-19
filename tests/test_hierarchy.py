@@ -51,6 +51,47 @@ class TestHierarchy(unittest.TestCase):
         self.assertEqual(row['road_condition'], 'Bad')
         self.assertEqual(row['parent_id'], 'UPC001_LHS_0_1000')
 
+    def test_lane_1000m_builder(self):
+        from src.hierarchy.lane_builder import build_lane_1000m
+        from config.table_schema import enforce_table_schema, FINAL_TABLE_SCHEMAS
+
+        src_df = pd.DataFrame({
+            'lane': ['L1', 'L2', 'R1', 'L1'],
+            'start_chainage': [0, 0, 1000, 1000],
+            'end_chainage': [1000, 1000, 2000, 2000],
+            'metric_value': [1500.0, 2500.0, 2600.0, 100.0],
+            'breach_flag': [0, 1, 1, 0],
+            'threshold_name': ['As per CA'] * 3 + ['As per IRC'],      # the IRC row is not a lane record
+            'length_m': [1000.0, 1000.0, 1000.0, 1000.0],
+        })
+        out = build_lane_1000m('roughness', src_df, 'UPC001', irc_threshold=2400.0)
+
+        self.assertEqual(len(out), 3)                                   # lanes kept apart, no LHS/RHS pooling
+        self.assertEqual(sorted(out['lane']), ['L1', 'L2', 'R1'])
+        l2 = out[out['lane'] == 'L2'].iloc[0]
+        self.assertEqual(l2['id'], 'UPC001_master_roughness_1000m_lane_L2_0')
+        self.assertEqual(l2['parent_id'], 'UPC001_L2_0_1000')
+        self.assertEqual(l2['collection_name'], 'master_roughness_1000m_lane')
+        self.assertEqual(l2['side'], 'LHS')
+        self.assertEqual(l2['direction'], 'Increasing')
+        self.assertEqual(l2['affected_length_ca'], 1000.0)
+        self.assertEqual(l2['affected_length_irc'], 1000.0)             # 2500 >= 2400
+        self.assertEqual(l2['rating_irc'], 'Poor')
+        l1 = out[out['lane'] == 'L1'].iloc[0]
+        self.assertEqual(l1['affected_length_ca'], 0.0)
+        self.assertEqual(l1['rating_irc'], 'Good')
+        self.assertEqual(out[out['lane'] == 'R1'].iloc[0]['side'], 'RHS')
+
+        # no pothole table, empty source -> nothing
+        self.assertTrue(build_lane_1000m('pothole', src_df, 'UPC001').empty)
+        self.assertTrue(build_lane_1000m('rutting', None, 'UPC001').empty)
+
+        # schema of the new table is the parent's schema
+        for d in ('roughness', 'rutting', 'cracking', 'ravelling'):
+            self.assertIn(f'master_{d}_1000m_lane', FINAL_TABLE_SCHEMAS)
+        enforced = enforce_table_schema(out, 'master_roughness_1000m_lane')
+        self.assertEqual(list(enforced.columns), FINAL_TABLE_SCHEMAS['master_roughness_1000m_lane'])
+
     def test_display_defect_id_assignment(self):
         # Parent table with 1 breach
         parent_df = pd.DataFrame({

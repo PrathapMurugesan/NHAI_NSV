@@ -173,4 +173,13 @@ python3 -m unittest discover tests
 | 13 | `geometry_child` | 13 | `child` | Surveyed geometry segments per lane with GPS |
 | 14 | `master_chainage` | 54 | `master` | Continuous 10m chainage spine with lane & side GPS |
 | 15 | `dlm_validation_results` | 9 | `report` | Unified V1–V9 validation checks report |
+| 16 | `master_roughness_1000m_lane` | 93 | `lane_1000m` | Lane-wise (L1, L2, ... R1, ...) 1000m roughness, not pooled into LHS / RHS |
+| 17 | `master_rutting_1000m_lane` | 92 | `lane_1000m` | Lane-wise 1000m rutting |
+| 18 | `master_cracking_1000m_lane` | 89 | `lane_1000m` | Lane-wise 1000m cracking |
+| 19 | `master_ravelling_1000m_lane` | 92 | `lane_1000m` | Lane-wise 1000m ravelling |
+
+The `master_<defect>_1000m_lane` tables (no pothole) have one record per lane per 1000m, from the lane-wise 1000m aggregate
+(CA values). `breach_flag` / `affected_length_ca` use the CA threshold; `affected_length_irc` (and `rating_irc` for roughness and
+rutting) use the IRC limit on the same record. They are numbered after the main tables, so `display_defect_id` is empty and the
+IDs of the other tables do not change.
 
