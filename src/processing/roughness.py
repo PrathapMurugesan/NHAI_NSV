@@ -129,6 +129,10 @@ def build_roughness_linear_set(
             "affected_length_irc": float(seg_len) if compute_roughness_breach_irc(bi_val, irc_iri_threshold) else 0.0,
         })
     norm_pdf = pd.DataFrame(norm_rows)
+    # Force numeric dtype: columns that are entirely missing (e.g. no LWP/RWP) would otherwise be object
+    for _c in ["roughness_bi", "iri_value", "lwp_iri", "rwp_iri", "metric_value"]:
+        if _c in norm_pdf.columns:
+            norm_pdf[_c] = pd.to_numeric(norm_pdf[_c], errors="coerce").astype(float)
 
     # 2. Child 10m Rows (split if longer than 10m)
     child_10m_rows = []

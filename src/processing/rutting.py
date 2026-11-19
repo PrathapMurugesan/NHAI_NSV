@@ -125,6 +125,10 @@ def build_rutting_linear_set(
             "affected_length_irc": float(seg_len) if compute_rutting_breach_irc(rut_val, irc_rut_threshold) else 0.0,
         })
     norm_pdf = pd.DataFrame(norm_rows)
+    # Force numeric dtype: columns that are entirely missing (e.g. no Left/Right) would otherwise be object
+    for _c in ["rutting_avg", "rut_left", "rut_right", "metric_value"]:
+        if _c in norm_pdf.columns:
+            norm_pdf[_c] = pd.to_numeric(norm_pdf[_c], errors="coerce").astype(float)
 
     # 10m Child Rows
     child_10m_rows = []
