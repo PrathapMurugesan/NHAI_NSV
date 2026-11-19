@@ -16,7 +16,7 @@ import requests
 import pandas as pd
 
 from src.common.logger import get_logger
-from src.common.fs_utils import path_exists, walk_files
+from src.common.fs_utils import path_exists, read_file_bytes, walk_files
 
 logger = get_logger(__name__)
 
@@ -102,15 +102,7 @@ class ImageUploader:
 
         for attempt in range(1, self.retries + 1):
             try:
-                if path.startswith("s3://"):
-                    import pyarrow.fs as pafs
-                    fs, path_in_fs = pafs.FileSystem.from_uri(path)
-                    with fs.open_input_stream(path_in_fs) as fh:
-                        img_bytes = fh.read()
-                    files = {'image': (os.path.basename(path), io.BytesIO(img_bytes), 'image/jpeg')}
-                else:
-                    with open(path, 'rb') as fh:
-                        files = {'image': (os.path.basename(path), io.BytesIO(fh.read()), 'image/jpeg')}
+                files = {'image': (os.path.basename(path), io.BytesIO(read_file_bytes(path)), 'image/jpeg')}
 
                 data = {'defect_type': kind, 'display_defect_id': safe_id}
                 r = self.session.post(self.upload_url, files=files, data=data, timeout=30)
