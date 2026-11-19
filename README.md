@@ -100,7 +100,12 @@ dlm-extraction-pipeline/
    - Each component is scaled 0–100 using max-observed value normalization across the survey.
 
 6. **LHS / RHS Silver Hierarchy:**
-   - **Roughness & Rutting:** 1000m parents aggregated by side (`LHS` for L-lanes, `RHS` for R-lanes). Parent metric value is the average of lanes; breaches if any lane breaches CA limit.
+   - **Roughness & Rutting:** 1000m parents aggregated by side (`LHS` for L-lanes, `RHS` for R-lanes), one record per side per km.
+     All 10m 'As per CA' rows of the side's lanes are pooled:
+     Roughness: Side IRI = (mean LWP + mean RWP)/2, Side BI = 630 × IRI^1.12. Rutting: Side rut = (mean Left + mean Right)/2.
+     `breach_flag` = side value ≥ CA limit; `affected_length_irc` / `rating_irc` = side value ≥ IRC limit on the same record (no IRC rows in the parent).
+   - **As per CA tables:** roughness, rutting and cracking are aggregated at the tracker's CA reporting interval (lane-wise). Ravelling is fixed at 100m.
+   - **IRC limits:** taken from D2 (defaults when missing) and applied with ≥; IRC rows exist only in the 10m tables.
    - **Cracking & Ravelling:** Top tables are lane-wise (`master_cracking_as_per_ca`, `master_ravelling`) with `parent_id = NULL`. Child 10m rows link directly to top table rows.
    - **Display Defect IDs:** Formatted as `D/{ddmmyy}/N/{counter:05d}` for top breaches, `{parent_display_id}/{counter:04d}` for child breaches, and orphan breaches receive new top counter sequences.
 

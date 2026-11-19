@@ -131,6 +131,14 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
     irc_rut_threshold = float(irc_thresholds.get('rutting_mm', IRC_TV.get('rutting', 10.0)))
     irc_ravel_threshold = float(irc_thresholds.get('ravelling', IRC_TV.get('ravelling', 10.0)))
 
+    # IRC limits used everywhere (10m IRC rows and IRC columns on the parent), from D2 with defaults
+    irc_threshold_map = {
+        'cracking': irc_crack_pct,
+        'roughness': irc_iri_threshold,
+        'rutting': irc_rut_threshold,
+        'ravelling': irc_ravel_threshold,
+    }
+
     # 3. D1 Context
     logger.info("[Step 3/10] Loading D1 Context...")
     d1_ctx = load_d1_context(settings.d1_dir, upc=settings.upc)
@@ -198,8 +206,17 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
         upc=settings.upc,
     )
 
+    crack_ca = build_cracking_agg_pdf(
+        crack_10m,
+        bin_m=int(ca_intervals.get('cracking') or CHILD_100M),
+        level='child_ca',
+        ca_crack_pct=ca_crack_pct,
+        upc=settings.upc,
+    )
+
     output_dfs['master_cracking'] = crack_10m
     output_dfs['master_cracking_child_100m'] = crack_100m
+    output_dfs['master_cracking_child_ca'] = crack_ca
     output_dfs['master_cracking_parent'] = crack_1km
 
     # Roughness
@@ -215,6 +232,7 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
         run_date=run_date,
         ca_bi_threshold=ca_bi_threshold,
         irc_iri_threshold=irc_iri_threshold,
+        ca_interval_m=ca_intervals.get('roughness'),
     )
     output_dfs.update(rough_sets)
 
@@ -231,6 +249,7 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
         run_date=run_date,
         ca_rut_threshold=ca_rut_threshold,
         irc_rut_threshold=irc_rut_threshold,
+        ca_interval_m=ca_intervals.get('rutting'),
     )
     output_dfs.update(rut_sets)
 
@@ -260,7 +279,7 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
     output_dfs = standardize_and_rate(output_dfs, thresholds=ca_threshold_map)
 
     # Apply cracking severity and condition formula (Cell 13)
-    for c_tbl in ['master_cracking', 'master_cracking_child_100m', 'master_cracking_parent']:
+    for c_tbl in ['master_cracking', 'master_cracking_child_100m', 'master_cracking_child_ca', 'master_cracking_parent']:
         if c_tbl in output_dfs:
             output_dfs[c_tbl] = apply_cracking_severity_and_condition(
                 output_dfs[c_tbl], ca_crack_pct=ca_crack_pct
@@ -274,7 +293,7 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
         date_str=display_date_str,
         ca_intervals=ca_intervals,
         ca_thresholds=ca_threshold_map,
-        irc_thresholds=IRC_TV,
+        irc_thresholds=irc_threshold_map,
     )
 
     upc_slash = settings.upc.replace('_', '/')

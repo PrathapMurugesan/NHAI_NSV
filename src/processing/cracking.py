@@ -315,6 +315,12 @@ def build_cracking_agg_pdf(
         return pd.DataFrame(columns=target_columns)
 
     d = ca_pdf.copy()
+    # Only the 'As per CA' rows: the 10m table also holds an IRC clone of every row,
+    # and including it would count every crack area twice.
+    if "threshold_name" in d.columns:
+        d = d[d["threshold_name"] == "As per CA"].copy()
+    if d.empty:
+        return pd.DataFrame(columns=target_columns)
     def _parse_measures(m):
         try:
             return json.loads(m) if isinstance(m, str) else {}
@@ -334,7 +340,10 @@ def build_cracking_agg_pdf(
     d["_bin"] = (d["_st"] // bin_m * bin_m).astype("int64")
     d = d.sort_values(["lane", "_st"])
 
-    tbl_name = "master_cracking_child_100m" if level == "child_100m" else "master_cracking_parent"
+    tbl_name = {
+        "child_100m": "master_cracking_child_100m",
+        "child_ca": "master_cracking_child_ca",
+    }.get(level, "master_cracking_parent")
     out = []
 
     for i, ((lane, b), g) in enumerate(d.groupby(["lane", "_bin"], sort=True)):

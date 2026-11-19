@@ -9,6 +9,8 @@ Preserves all business logic:
 - CA breach: BI >= CA_BI_THRESHOLD
 - IRC breach: BI >= IRC_IRI_POOR (or IRI > 2400 mm/km)
 - Dual records (As per CA and As per IRC) for 10m child
+- master_roughness_child_ca: lane-wise table at the tracker's CA reporting interval,
+  computed the same way as 100m (mean LWP, mean RWP -> Lane IRI -> BI)
 """
 
 import json
@@ -63,15 +65,19 @@ def build_roughness_linear_set(
     ca_bi_threshold: float,
     irc_iri_threshold: float,
     columns: Optional[List[str]] = None,
+    ca_interval_m: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Build master_roughness_child_10m, master_roughness_child_100m, master_roughness_parent.
+    Build master_roughness_child_10m, master_roughness_child_100m, master_roughness_child_ca,
+    master_roughness_parent.
     """
     target_columns = columns or list(BASE_DEFECT_COLUMNS)
+    ca_iv_m = int(ca_interval_m or get_reporting_interval(tracker_ctx, "roughness") or CHILD_100M)
     if df_raw.empty:
         return {
             "master_roughness_child_10m": pd.DataFrame(columns=target_columns),
             "master_roughness_child_100m": pd.DataFrame(columns=target_columns),
+            "master_roughness_child_ca": pd.DataFrame(columns=target_columns),
             "master_roughness_parent": pd.DataFrame(columns=target_columns),
         }
 
@@ -149,7 +155,7 @@ def build_roughness_linear_set(
         "survey_date": "first", "start_lat": "first", "start_long": "first",
         "end_lat": "last", "end_long": "last", "length_m": "sum", "row_id": "count",
         "start_chainage": "min", "end_chainage": "max",
-        "lwp_iri": "mean", "rwp_iri": "mean", "affected_length": "sum",
+        "lwp_iri": "mean", "rwp_iri": "mean", "iri_value": "mean", "affected_length": "sum",
         "total_length": "sum", "affected_length_ca": "sum", "affected_length_irc": "sum",
     }
     c100_agg = c100.groupby(gk100, dropna=False).agg(agg_dict).reset_index().rename(columns={"row_id": "segment_count"})
@@ -159,6 +165,11 @@ def build_roughness_linear_set(
     c100_agg.loc[valid100, "iri_value"] = avg_iri_100
     c100_agg.loc[valid100, "roughness_bi"] = 630.0 * (avg_iri_100 ** 1.12)
     c100_agg.loc[valid100, "metric_value"] = c100_agg.loc[valid100, "roughness_bi"]
+    # LWP/RWP missing -> BI from mean of the 10m lane IRI
+    _fb = ~valid100 & c100_agg["iri_value"].notna()
+    c100_agg.loc[_fb, "roughness_bi"] = 630.0 * (c100_agg.loc[_fb, "iri_value"] ** 1.12)
+    c100_agg.loc[_fb, "metric_value"] = c100_agg.loc[_fb, "roughness_bi"]
+    c100_agg.loc[~valid100 & ~_fb, ["roughness_bi", "metric_value"]] = np.nan
 
     # 4. Parent 1000m Aggregation
     c1k = norm_pdf.copy()
@@ -171,6 +182,27 @@ def build_roughness_linear_set(
     c1k_agg.loc[valid1k, "iri_value"] = avg_iri_1k
     c1k_agg.loc[valid1k, "roughness_bi"] = 630.0 * (avg_iri_1k ** 1.12)
     c1k_agg.loc[valid1k, "metric_value"] = c1k_agg.loc[valid1k, "roughness_bi"]
+    # LWP/RWP missing -> BI from mean of the 10m lane IRI
+    _fb = ~valid1k & c1k_agg["iri_value"].notna()
+    c1k_agg.loc[_fb, "roughness_bi"] = 630.0 * (c1k_agg.loc[_fb, "iri_value"] ** 1.12)
+    c1k_agg.loc[_fb, "metric_value"] = c1k_agg.loc[_fb, "roughness_bi"]
+    c1k_agg.loc[~valid1k & ~_fb, ["roughness_bi", "metric_value"]] = np.nan
+
+    # 4b. CA Reporting Interval Aggregation (tracker interval, lane-wise)
+    cca = norm_pdf.copy()
+    cca["bin_start"] = (cca["start_chainage"] // ca_iv_m) * ca_iv_m
+    cca["bin_end"] = cca["bin_start"] + ca_iv_m
+    cca_agg = cca.groupby(["lane", "bin_start", "bin_end"], dropna=False).agg(agg_dict).reset_index().rename(columns={"row_id": "segment_count"})
+    validca = cca_agg["lwp_iri"].notna() & cca_agg["rwp_iri"].notna()
+    avg_iri_ca = (cca_agg.loc[validca, "lwp_iri"] + cca_agg.loc[validca, "rwp_iri"]) / 2
+    cca_agg.loc[validca, "iri_value"] = avg_iri_ca
+    cca_agg.loc[validca, "roughness_bi"] = 630.0 * (avg_iri_ca ** 1.12)
+    cca_agg.loc[validca, "metric_value"] = cca_agg.loc[validca, "roughness_bi"]
+    # LWP/RWP missing -> BI from mean of the 10m lane IRI
+    _fb = ~validca & cca_agg["iri_value"].notna()
+    cca_agg.loc[_fb, "roughness_bi"] = 630.0 * (cca_agg.loc[_fb, "iri_value"] ** 1.12)
+    cca_agg.loc[_fb, "metric_value"] = cca_agg.loc[_fb, "roughness_bi"]
+    cca_agg.loc[~validca & ~_fb, ["roughness_bi", "metric_value"]] = np.nan
 
     # 5. Build Records Function
     def _to_table_records(pdf_data, level_name, coll_name, is_ca_only=False):
@@ -256,7 +288,7 @@ def build_roughness_linear_set(
                 "direction": first_non_null(dir_val, road_ctx.get("direction")),
                 "parent_start_chainage": p_start,
                 "parent_end_chainage": p_end,
-                "reporting_interval_m": get_reporting_interval(tracker_ctx, "roughness"),
+                "reporting_interval_m": ca_iv_m if level_name == "child_ca" else get_reporting_interval(tracker_ctx, "roughness"),
                 "segment_count": int(r.get("segment_count", 1) or 1),
                 "roughness_bi": bi,
                 "iri_value": iri,
@@ -312,10 +344,12 @@ def build_roughness_linear_set(
 
     df_10m = _to_table_records(child_10m_pdf, "child_10m", "master_roughness_child_10m", is_ca_only=False)
     df_100m = _to_table_records(c100_agg, "child_100m", "master_roughness_child_100m", is_ca_only=True)
+    df_ca = _to_table_records(cca_agg, "child_ca", "master_roughness_child_ca", is_ca_only=True)
     df_1km = _to_table_records(c1k_agg, "parent", "master_roughness_parent", is_ca_only=True)
 
     return {
         "master_roughness_child_10m": df_10m,
         "master_roughness_child_100m": df_100m,
+        "master_roughness_child_ca": df_ca,
         "master_roughness_parent": df_1km,
     }

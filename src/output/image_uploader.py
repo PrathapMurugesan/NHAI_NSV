@@ -7,6 +7,7 @@ to the central CDN API endpoint, and updates image_url / image_urls.
 """
 
 from typing import Dict, List, Tuple, Optional, Any
+import io
 import os
 import re
 import time

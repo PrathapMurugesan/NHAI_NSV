@@ -344,6 +344,10 @@ def backfill_pci_to_outputs(
         if 'parent' in tbl_name:
             lvl = '1km'
             grid = PARENT_LENGTH_M
+        elif tbl_name.endswith('_child_ca'):
+            iv = pd.to_numeric(df.get('reporting_interval_m'), errors='coerce').dropna()
+            iv = int(iv.iloc[0]) if len(iv) else CHILD_100M
+            lvl, grid = ('1km', PARENT_LENGTH_M) if iv >= PARENT_LENGTH_M else ('100m', CHILD_100M)
         elif '100m' in tbl_name:
             lvl = '100m'
             grid = CHILD_100M

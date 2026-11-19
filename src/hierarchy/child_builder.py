@@ -153,7 +153,7 @@ def build_child_10m(
     if not irc_rows.empty:
         mv = pd.to_numeric(irc_rows['metric_value'], errors='coerce').fillna(0.0)
         irc_rows['threshold_value'] = tv
-        bf = (mv > tv).astype(int)
+        bf = (mv >= tv).astype(int)
         irc_rows['breach_flag'] = bf
 
         length = pd.to_numeric(

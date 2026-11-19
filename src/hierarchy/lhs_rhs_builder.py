@@ -31,6 +31,7 @@ from src.common.constants import (
     SRC_10M,
     SRC_100,
     SRC_1KM,
+    SRC_CA,
     CA_CRACK_PCT,
     CA_BI_THRESHOLD,
     CA_RUT_THRESHOLD,
@@ -156,13 +157,13 @@ def assign_display_defect_ids(
                 has_p_rows = cdf[has_p].copy()
                 has_p_rows = sort_key_df(has_p_rows)
 
-                # Group by parent_id to assign 4-digit sequence
-                child_seq_list = []
-                for pid, grp in has_p_rows.groupby('parent_id', sort=False):
-                    pdid = grp['_pdid'].iloc[0]
-                    for idx, _ in enumerate(grp.itertuples()):
-                        child_seq_list.append(f"{pdid}/{idx + 1:04d}")
-                has_p_rows['display_defect_id'] = child_seq_list
+                # 4-digit sequence per parent, in side/lane/chainage order. Computed row by row
+                # (cumcount) so each row keeps its own parent's ID even when one parent's
+                # children are not contiguous (several lanes on one side).
+                seq = has_p_rows.groupby('parent_id', sort=False).cumcount() + 1
+                has_p_rows['display_defect_id'] = [
+                    f"{p}/{n:04d}" for p, n in zip(has_p_rows['_pdid'], seq)
+                ]
             else:
                 has_p_rows = pd.DataFrame(columns=cdf.columns)
 
@@ -220,13 +221,23 @@ def build_all_silver_hierarchy(
             p_table = t_parent(d)
             p_src = SRC_1KM[d] if parent_len(d) == PARENT_LENGTH_M else SRC_100[d]
             src_df = output_dfs.get(p_src)
-            new_outputs[p_table] = build_side_parent(d, src_df, upc, ca_ths[d], PARENT_LENGTH_M)
+            new_outputs[p_table] = build_side_parent(
+                d, src_df, upc, ca_ths[d], PARENT_LENGTH_M,
+                src_10m=output_dfs.get(SRC_10M[d]),
+                irc_threshold=irc_ths.get(d),
+            )
 
         # Build children
         for t, kind in TABLE_SPEC[d]['children']:
             if kind == 'ca':
-                base_df = output_dfs.get(SRC_100[d])
-                src_name = SRC_100[d]
+                # Prefer the table aggregated at the tracker's CA interval;
+                # fall back to 100m (ravelling is fixed at 100m in TABLE_SPEC).
+                ca_src = SRC_CA.get(d)
+                if TABLE_SPEC[d].get('ca_interval_m') is None and ca_src in output_dfs and output_dfs[ca_src] is not None:
+                    src_name = ca_src
+                else:
+                    src_name = SRC_100[d]
+                base_df = output_dfs.get(src_name)
                 new_outputs[t] = build_child_ca(d, t, base_df, src_name, upc, ca_ivs.get(d))
             elif kind == '10m':
                 src_10m = output_dfs.get(SRC_10M[d])

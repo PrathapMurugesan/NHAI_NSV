@@ -4,10 +4,13 @@ Rutting defect processing, wheel-path averaging, aggregation, and breach detecti
 Migrated from Notebook Cell 4, Cell 7, and Cell 9 (Linear Output Sets).
 Preserves all business logic:
 - Averages Left and Right rut depths: Rutting Average = (Rutting Left + Rutting Right) / 2
-- 10m splitting and 100m / 1000m aggregation
+- 10m splitting and 100m / CA-interval / 1000m aggregation:
+  (mean Left + mean Right)/2, or mean of the 10m average when Left/Right are missing
 - CA breach: Rutting >= CA_RUT_THRESHOLD
 - IRC breach: Rutting >= IRC_RUT_THRESHOLD (or > 10.0mm)
 - Dual records (As per CA and As per IRC) for 10m child
+- master_rutting_child_ca: lane-wise table at the tracker's CA reporting interval,
+  computed the same way as 100m (mean left, mean right -> average)
 """
 
 import json
@@ -61,15 +64,19 @@ def build_rutting_linear_set(
     ca_rut_threshold: float,
     irc_rut_threshold: float,
     columns: Optional[List[str]] = None,
+    ca_interval_m: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Build master_rutting_child_10m, master_rutting_child_100m, master_rutting_parent.
+    Build master_rutting_child_10m, master_rutting_child_100m, master_rutting_child_ca,
+    master_rutting_parent.
     """
     target_columns = columns or list(BASE_DEFECT_COLUMNS)
+    ca_iv_m = int(ca_interval_m or get_reporting_interval(tracker_ctx, "rutting") or CHILD_100M)
     if df_raw.empty:
         return {
             "master_rutting_child_10m": pd.DataFrame(columns=target_columns),
             "master_rutting_child_100m": pd.DataFrame(columns=target_columns),
+            "master_rutting_child_ca": pd.DataFrame(columns=target_columns),
             "master_rutting_parent": pd.DataFrame(columns=target_columns),
         }
 
@@ -144,13 +151,14 @@ def build_rutting_linear_set(
         "survey_date": "first", "start_lat": "first", "start_long": "first",
         "end_lat": "last", "end_long": "last", "length_m": "sum", "row_id": "count",
         "start_chainage": "min", "end_chainage": "max",
-        "rut_left": "mean", "rut_right": "mean", "affected_length": "sum",
+        "rut_left": "mean", "rut_right": "mean", "rutting_avg": "mean", "affected_length": "sum",
         "total_length": "sum", "affected_length_ca": "sum", "affected_length_irc": "sum",
     }
     c100_agg = c100.groupby(gk100, dropna=False).agg(agg_dict).reset_index().rename(columns={"row_id": "segment_count"})
     valid100 = c100_agg["rut_left"].notna() & c100_agg["rut_right"].notna()
     c100_agg.loc[valid100, "rutting_avg"] = (c100_agg.loc[valid100, "rut_left"] + c100_agg.loc[valid100, "rut_right"]) / 2
-    c100_agg.loc[valid100, "metric_value"] = c100_agg.loc[valid100, "rutting_avg"]
+    # Left/Right missing -> keep mean of the 10m average rut depth
+    c100_agg["metric_value"] = c100_agg["rutting_avg"]
 
     # 1000m Parent Aggregation
     c1k = norm_pdf.copy()
@@ -160,7 +168,18 @@ def build_rutting_linear_set(
     c1k_agg = c1k.groupby(gk1k, dropna=False).agg(agg_dict).reset_index().rename(columns={"row_id": "segment_count"})
     valid1k = c1k_agg["rut_left"].notna() & c1k_agg["rut_right"].notna()
     c1k_agg.loc[valid1k, "rutting_avg"] = (c1k_agg.loc[valid1k, "rut_left"] + c1k_agg.loc[valid1k, "rut_right"]) / 2
-    c1k_agg.loc[valid1k, "metric_value"] = c1k_agg.loc[valid1k, "rutting_avg"]
+    # Left/Right missing -> keep mean of the 10m average rut depth
+    c1k_agg["metric_value"] = c1k_agg["rutting_avg"]
+
+    # CA Reporting Interval Aggregation (tracker interval, lane-wise)
+    cca = norm_pdf.copy()
+    cca["bin_start"] = (cca["start_chainage"] // ca_iv_m) * ca_iv_m
+    cca["bin_end"] = cca["bin_start"] + ca_iv_m
+    cca_agg = cca.groupby(["lane", "bin_start", "bin_end"], dropna=False).agg(agg_dict).reset_index().rename(columns={"row_id": "segment_count"})
+    validca = cca_agg["rut_left"].notna() & cca_agg["rut_right"].notna()
+    cca_agg.loc[validca, "rutting_avg"] = (cca_agg.loc[validca, "rut_left"] + cca_agg.loc[validca, "rut_right"]) / 2
+    # Left/Right missing -> keep mean of the 10m average rut depth
+    cca_agg["metric_value"] = cca_agg["rutting_avg"]
 
     def _to_table_records(pdf_data, level_name, coll_name, is_ca_only=False):
         ca_recs = []
@@ -245,7 +264,7 @@ def build_rutting_linear_set(
                 "direction": first_non_null(dir_val, road_ctx.get("direction")),
                 "parent_start_chainage": p_start,
                 "parent_end_chainage": p_end,
-                "reporting_interval_m": get_reporting_interval(tracker_ctx, "rutting"),
+                "reporting_interval_m": ca_iv_m if level_name == "child_ca" else get_reporting_interval(tracker_ctx, "rutting"),
                 "segment_count": int(r.get("segment_count", 1) or 1),
                 "rutting_avg": rut_val,
                 "rating_ca": sev,
@@ -298,10 +317,12 @@ def build_rutting_linear_set(
 
     df_10m = _to_table_records(child_10m_pdf, "child_10m", "master_rutting_child_10m", is_ca_only=False)
     df_100m = _to_table_records(c100_agg, "child_100m", "master_rutting_child_100m", is_ca_only=True)
+    df_ca = _to_table_records(cca_agg, "child_ca", "master_rutting_child_ca", is_ca_only=True)
     df_1km = _to_table_records(c1k_agg, "parent", "master_rutting_parent", is_ca_only=True)
 
     return {
         "master_rutting_child_10m": df_10m,
         "master_rutting_child_100m": df_100m,
+        "master_rutting_child_ca": df_ca,
         "master_rutting_parent": df_1km,
     }

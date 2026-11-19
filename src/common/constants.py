@@ -107,6 +107,8 @@ SRC_10M = {
 }
 SRC_100 = {d: f"master_{d}_child_100m" for d in DEFECTS_LINEAR}
 SRC_1KM = {d: f"master_{d}_parent" for d in DEFECTS_LINEAR}
+# Lane-wise tables aggregated at the tracker's CA reporting interval
+SRC_CA = {d: f"master_{d}_child_ca" for d in DEFECTS_LINEAR}
 
 DEFECTS_LIN = DEFECTS_LINEAR
 IRC_TV = IRC_FIXED_THRESHOLDS

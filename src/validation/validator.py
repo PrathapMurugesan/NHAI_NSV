@@ -168,15 +168,18 @@ class Validator:
             self._rec('V3 CA child', f'row length <= {iv} m', child_ca_table, len(C), int((ln > iv + 1e-6).sum()))
 
     def _v4_v5_v6_v7_v8(self) -> None:
-        pmap = {}
+        # Parent lookup per defect: roughness and rutting parents share the same parent_id format
+        # (e.g. <UPC>_LHS_0_1000), so one shared map would mix their display IDs.
+        pmaps = {}
         for d in ALL_DEFECTS:
             tp = t_top(d)
+            pmaps[d] = {}
             if tp in self.new_outputs and self.new_outputs[tp] is not None:
                 top_df = self.new_outputs[tp]
                 k_col = 'parent_id' if has_parent(d) else 'id'
                 if k_col in top_df.columns and 'display_defect_id' in top_df.columns:
                     valid = top_df.dropna(subset=[k_col, 'display_defect_id'])
-                    pmap.update(dict(zip(valid[k_col], valid['display_defect_id'])))
+                    pmaps[d] = dict(zip(valid[k_col], valid['display_defect_id']))
 
         for d in ALL_DEFECTS:
             tp = t_top(d)
@@ -212,7 +215,7 @@ class Validator:
 
                 # Child ID format
                 if t != tp and 'parent_id' in C.columns:
-                    pd_id = C['parent_id'].map(pmap)
+                    pd_id = C['parent_id'].map(pmaps[d])
                     has = br & pd_id.notna()
                     if has.any():
                         ok = sum(
