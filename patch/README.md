@@ -20,11 +20,14 @@ What changes on a parent / lane record that becomes a breach (a row that is alre
 | `road_condition` | `Bad` |
 | `affected_length_ca`, `affected_length` | the parent's `total_length` |
 | `affected_length_irc`, `rating_irc` (IRC child breach) | `total_length`, `Poor` |
-| `display_defect_id` (CA, parents only) | a new `D/<ddmmyy>/N/<n>`, continuing the UPC's counter - the lane tables have no display IDs |
+| `display_defect_id` | only if the row has none: a new `D/<ddmmyy>/N/<n>`, continuing the UPC's counter |
 | `measures` (JSON) | `breach_ca`, `breach_from_child_ca` / `_irc`, `patched_parent_breach` |
 
-No existing display ID of any table changes, so the children and the image upload log keep their IDs. Children
-that were breaching without a flagged parent keep their own top-level ID. `rating_ca` (the Good / Fair / Poor band of
+**Defect IDs: if a breach row already has a `display_defect_id` it is kept; if it has none, one is generated**
+(for parents and for lane records, including lane rows that were breaches before and never got an ID). The new
+numbers continue the UPC's counter (highest counter of any of its tables + 1), so no ID is used twice. No existing
+display ID of any table changes, so the children and the image upload log keep their IDs. Children that were
+breaching without a flagged parent keep their own top-level ID. `rating_ca` (the Good / Fair / Poor band of
 the average) is not touched.
 
 ```bash

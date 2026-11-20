@@ -13,10 +13,12 @@ defect (CA values, as for the side parents); here they get their own identity an
   - affected_length_irc / rating_irc : lane value >= IRC limit OR any 10m 'As per IRC' child breaches, on the
     same record (no IRC row, as for the side parents); rating_irc is set for roughness and rutting only
   - road_condition becomes 'Bad' on a row that is a breach only because of a child
+  - display_defect_id is not set here: assign_missing_display_ids() numbers the breach rows afterwards
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 import json
+import re
 import numpy as np
 import pandas as pd
 
@@ -29,6 +31,46 @@ from src.common.constants import (
 from src.common.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+DISPLAY_ID_RE = re.compile(r"^D/(\d{6})/N/(\d{5})(?:/\d{4})?$")     # D/<ddmmyy>/N/<nnnnn> (and its /<nnnn> children)
+
+
+def max_display_seq(*frames: Optional[pd.DataFrame]) -> int:
+    """Highest top counter (the nnnnn) among the display_defect_id of the given tables (0 when there is none)."""
+    top = 0
+    for df in frames:
+        if df is None or df.empty or 'display_defect_id' not in df.columns:
+            continue
+        for v in df['display_defect_id'].dropna().astype(str):
+            m = DISPLAY_ID_RE.match(v)
+            if m:
+                top = max(top, int(m.group(2)))
+    return top
+
+
+def assign_missing_display_ids(df: pd.DataFrame, date_str: str, start_seq: int) -> Tuple[pd.DataFrame, int]:
+    """
+    Breach rows (breach_flag == 1) that have no display_defect_id get D/<date>/N/<seq:05d>, numbered from
+    start_seq in side / lane / chainage order. A row that already has an ID keeps it - nothing is renumbered.
+    Returns (table, number of IDs assigned).
+    """
+    out = df.copy()
+    if 'display_defect_id' not in out.columns:
+        out['display_defect_id'] = None
+    has = out['display_defect_id'].notna() & (out['display_defect_id'].astype(str) != '')
+    need = (pd.to_numeric(out['breach_flag'], errors='coerce').fillna(0).astype(int) == 1) & ~has
+    n = int(need.sum())
+    if not n:
+        return out, 0
+    order = out[need].copy()
+    col = lambda c, fill: order[c].fillna(fill) if c in order.columns else fill
+    order['_s'], order['_l'], order['_i'] = col('side', 'ZZZ'), col('lane', 'ZZZ'), col('id', '')
+    order['_c'] = pd.to_numeric(order['start_chainage'], errors='coerce').fillna(999999999)
+    order = order.sort_values(['_s', '_l', '_c', '_i'], kind='stable')
+    ids = {i: f"D/{date_str}/N/{start_seq + k:05d}" for k, i in enumerate(order.index)}
+    out.loc[order.index, 'display_defect_id'] = pd.Series(ids)
+    return out, n
 
 
 def child_breach_lane_bins(src_10m: Optional[pd.DataFrame], threshold_name: str, parent_len_m: int) -> set:

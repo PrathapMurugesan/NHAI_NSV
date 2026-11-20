@@ -16,19 +16,23 @@ import patch_parent_breach as P  # noqa: E402
 
 
 def _lane_table():
+    """L1 and L2 are not breaches; L3 is a breach that already has its ID; L4 is a breach without an ID."""
+    n = 4
     return pd.DataFrame({
-        'id': ['U1_lane_L1_0', 'U1_lane_L2_0'], 'lane': ['L1', 'L2'],
-        'start_chainage': [0, 0], 'end_chainage': [1000, 1000], 'length_m': [1000.0, 1000.0],
-        'parent_start_chainage': [0, 0], 'parent_id': ['U1_L1_0_1000', 'U1_L2_0_1000'],
-        'breach_flag': [0, 0], 'defect_id': [None, None], 'road_condition': ['Good', 'Good'],
-        'affected_length_ca': [0.0, 0.0], 'affected_length': [0.0, 0.0], 'affected_length_irc': [0.0, 0.0],
-        'measures': [json.dumps({}), json.dumps({})],
+        'id': [f'U1_lane_L{i}_0' for i in range(1, n + 1)], 'lane': ['L1', 'L2', 'L3', 'L4'],
+        'start_chainage': [0] * n, 'end_chainage': [1000] * n, 'length_m': [1000.0] * n,
+        'parent_start_chainage': [0] * n, 'parent_id': [f'U1_L{i}_0_1000' for i in range(1, n + 1)],
+        'breach_flag': [0, 0, 1, 1], 'defect_id': [None, None, 'U1_L3_0_1000', 'U1_L4_0_1000'],
+        'display_defect_id': [None, None, 'D/201126/N/00007', None],
+        'road_condition': ['Good', 'Good', 'Bad', 'Bad'],
+        'affected_length_ca': [0.0, 0.0, 1000.0, 1000.0], 'affected_length': [0.0, 0.0, 1000.0, 1000.0],
+        'affected_length_irc': [0.0] * n, 'measures': [json.dumps({})] * n,
     })
 
 
 def _children_10m():
     rows = []
-    for lane in ('L1', 'L2'):
+    for lane in ('L1', 'L2', 'L3', 'L4'):
         for st in range(0, 1000, 10):
             for std in ('CA', 'IRC'):
                 rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, threshold_name=f'As per {std}',
@@ -64,6 +68,12 @@ class TestParentBreachPatch(unittest.TestCase):
         self.assertEqual(out.loc['L1', 'affected_length_irc'], 0.0)         # the child breaches CA only
         self.assertEqual(out.loc['L2', 'breach_flag'], 0)
         self.assertEqual(out.loc['L2', 'road_condition'], 'Good')
+
+        # defect IDs: an ID that is there stays, a breach without one gets the next numbers of the UPC's counter
+        self.assertEqual(out.loc['L3', 'display_defect_id'], 'D/201126/N/00007')       # already present -> untouched
+        self.assertEqual(out.loc['L1', 'display_defect_id'], 'D/201126/N/00008')       # newly breached, lane order
+        self.assertEqual(out.loc['L4', 'display_defect_id'], 'D/201126/N/00009')       # breach that never had an ID
+        self.assertTrue(pd.isna(out.loc['L2', 'display_defect_id']))                  # not a breach -> no ID
         m = json.loads(out.loc['L1', 'measures'])
         self.assertEqual((m['breach_from_child_ca'], m['breach_from_value_ca']), (1, 0))
         self.assertIn('patched_parent_breach', m)

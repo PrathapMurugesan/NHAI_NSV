@@ -8,14 +8,15 @@ breach when its value is above the limit OR when any one 10m child (of that side
 breach. CA and IRC are decided separately, each from its own 10m rows. The extraction is NOT run again: the patch
 reads the UPC's existing parquets, changes only the parent and lane tables and writes them back.
 
-Per parent row that becomes a breach (a row that is already a breach never changes, so the patch can run twice):
+Per parent / lane row that becomes a breach (a row that is already a breach never changes, so the patch can run twice):
     CA   breach_flag = 1, defect_id = parent_id, road_condition = 'Bad',
-         affected_length_ca / affected_length = total_length, display_defect_id = new ID
-    IRC  affected_length_irc = total_length, rating_irc = 'Poor'
+         affected_length_ca / affected_length = total_length (parents) or length_m (lanes)
+    IRC  affected_length_irc = the same length, rating_irc = 'Poor' (roughness / rutting)
     measures JSON gets breach_* / breach_from_child_* (and patched_parent_breach)
-The same columns change on a lane record, except the display ID: the lane tables carry no display_defect_id.
-New display IDs of the parents continue the UPC's counter (D/<ddmmyy>/N/<max + 1>); no existing ID of any table is
-changed, so the child rows (and the image upload log) keep their IDs.
+Defect IDs: a breach row that already has a display_defect_id keeps it; a breach row that has none gets a new
+D/<ddmmyy>/N/<n> continuing the UPC's counter (highest counter of any of its tables + 1). So the lane tables, which
+had no IDs, are numbered too. No existing ID of any table is changed, so the child rows (and the image upload log)
+keep their IDs.
 A UPC processed before the lane tables existed has no master_<defect>_1000m_lane file: it is reported as skipped
 (run that UPC again to get the tables).
 
@@ -51,12 +52,12 @@ import pandas as pd
 
 from src.common.constants import PARENT_LENGTH_M, TABLE_SPEC, lane_1000m_table, normalize_lane
 from src.common.fs_utils import list_dir, path_exists, read_file_bytes, write_file_bytes
-from src.hierarchy.lane_builder import child_breach_lane_bins
+from src.hierarchy.lane_builder import assign_missing_display_ids, child_breach_lane_bins
 from src.hierarchy.parent_builder import child_breach_bins
 
 DEFAULT_SILVER_ROOT = "s3://dhms-new-stgae/DHMS/NSV/Silver"
 DEFECTS = ("roughness", "rutting")             # the defects with LHS / RHS parents
-LANE_DEFECTS = ("roughness", "rutting", "cracking", "ravelling")      # the defects with a lane-wise 1000m table
+LANE_DEFECTS = ("roughness", "rutting", "ravelling", "cracking")      # the defects with a lane-wise 1000m table
 ID_RE = re.compile(r"^D/(\d{6})/N/(\d{5})(?:/\d{4})?$")
 REPORT_COLS = ["zone", "phase", "cycle", "upc", "table", "parents", "to_ca_breach", "to_irc_breach",
                "new_display_ids", "status", "note"]
@@ -161,165 +162,124 @@ def _child_10m_table(defect: str) -> str:
     return next(t for t, kind in TABLE_SPEC[defect]["children"] if kind == "10m")
 
 
-def _patch_lanes(root: str, key: Tuple[str, str, str, str], apply: bool, backup_root: str, stamp: str) -> List[Dict]:
-    """master_<defect>_1000m_lane: breach also when any 10m child of the lane in those 1000m breaches."""
-    zone, phase, cycle, upc = key
-    base = dict(zone=zone, phase=phase, cycle=cycle, upc=upc)
-    folder = f"{_up(root)}/Zone={zone}/Phase={phase}/Cycle={cycle}/UPC={upc}/dlm_kpi_new"
-    rows = []
-    for d in LANE_DEFECTS:
-        t_lane, t_child = lane_1000m_table(d), _child_10m_table(d)
-        l_path, c_path = f"{folder}/{t_lane}.parquet", f"{folder}/{t_child}.parquet"
-        if not path_exists(l_path):
-            rows.append({**base, "table": t_lane, "status": "skipped",
-                         "note": "no lane table in this UPC (processed before the lane tables existed) - run it again"})
-            continue
-        lane = _read(l_path)
-        if lane.empty:
-            rows.append({**base, "table": t_lane, "parents": 0, "status": "skipped", "note": "lane table is empty"})
-            continue
-        if not path_exists(c_path):
-            rows.append({**base, "table": t_lane, "parents": len(lane), "status": "skipped",
-                         "note": f"{t_child} not found - cannot see the children"})
-            continue
-        child = _read(c_path)
+def _num(df: pd.DataFrame, col: str) -> pd.Series:
+    return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(np.nan, index=df.index)
+
+
+def _needs_id(df: pd.DataFrame) -> pd.Series:
+    """Breach rows that have no display_defect_id yet."""
+    has = pd.Series(False, index=df.index)
+    if "display_defect_id" in df.columns:
+        has = df["display_defect_id"].notna() & (df["display_defect_id"].astype(str) != "")
+    return (_num(df, "breach_flag").fillna(0).astype(int) == 1) & ~has
+
+
+def _prep(folder: str, base: Dict, kind: str, d: str, rows: List[Dict], stamp: str) -> Optional[Dict]:
+    """
+    Load one 'parent' (LHS / RHS) or 'lane' table and the defect's 10m table, and apply the breach rule in memory.
+    Returns a work item, or None when the table cannot be patched (a 'skipped' row is added to rows).
+    """
+    if kind == "parent":
+        table, child_table = f"master_{d}_parent", f"master_{d}_child_10m"
+        missing = "parent table not found"
+    else:
+        table, child_table = lane_1000m_table(d), _child_10m_table(d)
+        missing = "no lane table in this UPC (processed before the lane tables existed) - run it again"
+    path, c_path = f"{folder}/{table}.parquet", f"{folder}/{child_table}.parquet"
+    if not path_exists(path):
+        rows.append({**base, "table": table, "status": "skipped", "note": missing})
+        return None
+    df = _read(path)
+    if df.empty:
+        rows.append({**base, "table": table, "parents": 0, "status": "skipped", "note": "table is empty"})
+        return None
+    if not path_exists(c_path):
+        rows.append({**base, "table": table, "parents": len(df), "status": "skipped",
+                     "note": f"{child_table} not found - cannot see the children"})
+        return None
+    child = _read(c_path)
+
+    bins = _parent_bin(df)
+    if kind == "parent":
+        ca_hits = child_breach_bins(child, "As per CA", PARENT_LENGTH_M)
+        irc_hits = child_breach_bins(child, "As per IRC", PARENT_LENGTH_M)
+        keys = list(zip(df["side"].astype(str), bins))
+        length = _num(df, "total_length").fillna(_num(df, "length_m"))
+    else:
         ca_hits = child_breach_lane_bins(child, "As per CA", PARENT_LENGTH_M)
         irc_hits = child_breach_lane_bins(child, "As per IRC", PARENT_LENGTH_M)
+        keys = list(zip(df["lane"].apply(normalize_lane), bins))
+        length = _num(df, "length_m").fillna((_num(df, "end_chainage") - _num(df, "start_chainage")).abs())
+    child_ca = pd.Series([(k, int(b)) in ca_hits for k, b in keys], index=df.index)
+    child_irc = pd.Series([(k, int(b)) in irc_hits for k, b in keys], index=df.index)
 
-        bins = _parent_bin(lane)
-        lanes = lane["lane"].apply(normalize_lane)
-        child_ca = pd.Series([(ln, int(b)) in ca_hits for ln, b in zip(lanes, bins)], index=lane.index)
-        child_irc = pd.Series([(ln, int(b)) in irc_hits for ln, b in zip(lanes, bins)], index=lane.index)
-        was_ca = pd.to_numeric(lane["breach_flag"], errors="coerce").fillna(0).astype(int) == 1
-        was_irc = pd.Series(False, index=lane.index)
-        if "affected_length_irc" in lane.columns:
-            was_irc |= pd.to_numeric(lane["affected_length_irc"], errors="coerce").fillna(0) > 0
-        if "rating_irc" in lane.columns:
-            was_irc |= lane["rating_irc"].astype(str) == "Poor"
-        to_ca, to_irc = child_ca & ~was_ca, child_irc & ~was_irc
-        n_ca, n_irc = int(to_ca.sum()), int(to_irc.sum())
-        rec = {**base, "table": t_lane, "parents": len(lane), "to_ca_breach": n_ca, "to_irc_breach": n_irc,
-               "new_display_ids": 0}
-        if not (n_ca or n_irc):
-            rows.append({**rec, "status": "unchanged", "note": ""})
-            continue
+    was_ca = _num(df, "breach_flag").fillna(0).astype(int) == 1
+    was_irc = pd.Series(False, index=df.index)
+    if "affected_length_irc" in df.columns:
+        was_irc |= _num(df, "affected_length_irc").fillna(0) > 0
+    if "rating_irc" in df.columns:
+        was_irc |= df["rating_irc"].astype(str) == "Poor"
+    to_ca, to_irc = child_ca & ~was_ca, child_irc & ~was_irc
 
-        out = lane.copy()
-        length = pd.to_numeric(out.get("length_m"), errors="coerce")
-        length = length.fillna((pd.to_numeric(out["end_chainage"], errors="coerce") -
-                                pd.to_numeric(out["start_chainage"], errors="coerce")).abs())
-        if n_ca:
-            out.loc[to_ca, "breach_flag"] = 1
-            out.loc[to_ca, "defect_id"] = out.loc[to_ca, "parent_id"]
-            out.loc[to_ca, "road_condition"] = "Bad"
-            out.loc[to_ca, "affected_length_ca"] = length[to_ca]
-            out.loc[to_ca, "affected_length"] = length[to_ca]
-        if n_irc:
-            out.loc[to_irc, "affected_length_irc"] = length[to_irc]
-            if d in ("roughness", "rutting"):
-                out.loc[to_irc, "rating_irc"] = "Poor"
-        if "measures" in out.columns:
-            for i in out.index[to_ca | to_irc]:
-                out.at[i, "measures"] = _patch_measures(out.at[i, "measures"], bool(to_ca[i]), bool(to_irc[i]),
-                                                        bool(was_ca[i]), bool(was_irc[i]), stamp)
-        if apply:
-            rel = l_path[len(_up(root)) + 1:]
-            write_file_bytes(f"{backup_root}/{rel}", read_file_bytes(l_path))      # original first
-            _write(out, l_path)
-            rows.append({**rec, "status": "patched", "note": f"backup: {backup_root}/{rel}"})
-        else:
-            rows.append({**rec, "status": "would patch", "note": "dry run (use --apply)"})
-    return rows
+    out = df.copy()
+    if to_ca.any():
+        out.loc[to_ca, "breach_flag"] = 1
+        out.loc[to_ca, "defect_id"] = out.loc[to_ca, "parent_id"]
+        out.loc[to_ca, "road_condition"] = "Bad"
+        out.loc[to_ca, "affected_length_ca"] = length[to_ca]
+        out.loc[to_ca, "affected_length"] = length[to_ca]
+    if to_irc.any():
+        out.loc[to_irc, "affected_length_irc"] = length[to_irc]
+        if d in ("roughness", "rutting"):
+            out.loc[to_irc, "rating_irc"] = "Poor"
+    if "measures" in out.columns:
+        for i in out.index[to_ca | to_irc]:
+            out.at[i, "measures"] = _patch_measures(out.at[i, "measures"], bool(to_ca[i]), bool(to_irc[i]),
+                                                    bool(was_ca[i]), bool(was_irc[i]), stamp)
+    return dict(table=table, path=path, df=df, out=out, to_ca=to_ca, to_irc=to_irc, need=_needs_id(out))
 
 
 def patch_upc(root: str, key: Tuple[str, str, str, str], apply: bool, backup_root: str, stamp: str) -> List[Dict]:
-    """Parents (LHS / RHS) and lane-wise 1000m tables of one UPC."""
-    return _patch_parents(root, key, apply, backup_root, stamp) + _patch_lanes(root, key, apply, backup_root, stamp)
-
-
-def _patch_parents(root: str, key: Tuple[str, str, str, str], apply: bool, backup_root: str, stamp: str) -> List[Dict]:
+    """
+    One UPC: the roughness / rutting LHS-RHS parents and the four lane-wise 1000m tables.
+    1. a record whose 10m child breaches becomes a breach (breach flag and the columns that follow from it)
+    2. every breach row that has no display_defect_id gets one (continuing the UPC's counter); an ID that is
+       already there is never changed
+    """
     zone, phase, cycle, upc = key
     base = dict(zone=zone, phase=phase, cycle=cycle, upc=upc)
     folder = f"{_up(root)}/Zone={zone}/Phase={phase}/Cycle={cycle}/UPC={upc}/dlm_kpi_new"
-    rows, work = [], []                              # work: (table, path, parent_df, to_ca mask, to_irc mask)
+    rows: List[Dict] = []
 
-    for d in DEFECTS:
-        t_par, t_child = f"master_{d}_parent", f"master_{d}_child_10m"
-        p_path, c_path = f"{folder}/{t_par}.parquet", f"{folder}/{t_child}.parquet"
-        if not path_exists(p_path):
-            rows.append({**base, "table": t_par, "status": "skipped", "note": "parent table not found"})
-            continue
-        parent = _read(p_path)
-        if parent.empty:
-            rows.append({**base, "table": t_par, "parents": 0, "status": "skipped", "note": "parent table is empty"})
-            continue
-        if not path_exists(c_path):
-            rows.append({**base, "table": t_par, "parents": len(parent), "status": "skipped",
-                         "note": f"{t_child} not found - cannot see the children"})
-            continue
-        child = _read(c_path)
-        ca_hits = child_breach_bins(child, "As per CA", PARENT_LENGTH_M)
-        irc_hits = child_breach_bins(child, "As per IRC", PARENT_LENGTH_M)
+    items = [it for it in (_prep(folder, base, "parent", d, rows, stamp) for d in DEFECTS) if it]
+    items += [it for it in (_prep(folder, base, "lane", d, rows, stamp) for d in LANE_DEFECTS) if it]
 
-        bins = _parent_bin(parent)
-        side = parent["side"].astype(str)
-        child_ca = pd.Series([(s, int(b)) in ca_hits for s, b in zip(side, bins)], index=parent.index)
-        child_irc = pd.Series([(s, int(b)) in irc_hits for s, b in zip(side, bins)], index=parent.index)
-        was_ca = pd.to_numeric(parent["breach_flag"], errors="coerce").fillna(0).astype(int) == 1
-        was_irc = pd.Series(False, index=parent.index)
-        if "affected_length_irc" in parent.columns:
-            was_irc |= pd.to_numeric(parent["affected_length_irc"], errors="coerce").fillna(0) > 0
-        if "rating_irc" in parent.columns:
-            was_irc |= parent["rating_irc"].astype(str) == "Poor"
-        work.append((t_par, p_path, parent, child_ca & ~was_ca, child_irc & ~was_irc, was_ca, was_irc))
-
-    # new display IDs for the parents that become a CA breach: continue the UPC's counter, never reuse one
-    need = sum(int(w[3].sum()) for w in work)
-    next_seq, date = 0, None
-    if need:
+    next_seq, date = 1, None
+    if any(it["need"].any() for it in items):
         top, date = _counter_state(folder)
-        date = date or _survey_date(work[0][2])
+        date = date or _survey_date(items[0]["df"])
         next_seq = top + 1
-        if date is None:
-            for w in work:
-                rows.append({**base, "table": w[0], "parents": len(w[2]), "to_ca_breach": int(w[3].sum()),
-                             "status": "skipped", "note": "new display IDs needed but the date could not be found"})
-            return rows
+        if date is None:                                # cannot number: leave those tables alone
+            for it in items:
+                if it["need"].any():
+                    rows.append({**base, "table": it["table"], "parents": len(it["df"]), "status": "skipped",
+                                 "note": "display IDs needed but the date could not be found"})
+            items = [it for it in items if not it["need"].any()]
 
-    for t_par, p_path, parent, to_ca, to_irc, was_ca, was_irc in work:
-        n_ca, n_irc = int(to_ca.sum()), int(to_irc.sum())
-        rec = {**base, "table": t_par, "parents": len(parent), "to_ca_breach": n_ca, "to_irc_breach": n_irc,
-               "new_display_ids": n_ca}
-        if not (n_ca or n_irc):
+    for it in items:
+        out, n_ids = it["out"], 0
+        if it["need"].any():
+            out, n_ids = assign_missing_display_ids(out, date, next_seq)
+            next_seq += n_ids
+        n_ca, n_irc = int(it["to_ca"].sum()), int(it["to_irc"].sum())
+        rec = {**base, "table": it["table"], "parents": len(it["df"]), "to_ca_breach": n_ca, "to_irc_breach": n_irc,
+               "new_display_ids": n_ids}
+        if not (n_ca or n_irc or n_ids):
             rows.append({**rec, "status": "unchanged", "note": ""})
-            continue
-
-        out = parent.copy()
-        total = pd.to_numeric(out.get("total_length"), errors="coerce")
-        total = total.fillna(pd.to_numeric(out.get("length_m"), errors="coerce"))
-        if n_ca:
-            order = out[to_ca].copy()                       # same order as the pipeline: side, lane, chainage, id
-            order["_ch"] = pd.to_numeric(order["start_chainage"], errors="coerce").fillna(999999999)
-            order = order.sort_values(["side", "lane", "_ch", "id"], kind="stable")
-            new_ids = {i: f"D/{date}/N/{next_seq + k:05d}" for k, i in enumerate(order.index)}
-            next_seq += n_ca
-            out.loc[to_ca, "breach_flag"] = 1
-            out.loc[to_ca, "defect_id"] = out.loc[to_ca, "parent_id"]
-            out.loc[to_ca, "road_condition"] = "Bad"
-            out.loc[to_ca, "affected_length_ca"] = total[to_ca]
-            out.loc[to_ca, "affected_length"] = total[to_ca]
-            out.loc[to_ca, "display_defect_id"] = pd.Series(new_ids)
-        if n_irc:
-            out.loc[to_irc, "affected_length_irc"] = total[to_irc]
-            out.loc[to_irc, "rating_irc"] = "Poor"
-        if "measures" in out.columns:
-            for i in out.index[to_ca | to_irc]:
-                out.at[i, "measures"] = _patch_measures(out.at[i, "measures"], bool(to_ca[i]), bool(to_irc[i]),
-                                                        bool(was_ca[i]), bool(was_irc[i]), stamp)
-        if apply:
-            rel = p_path[len(_up(root)) + 1:]
-            write_file_bytes(f"{backup_root}/{rel}", read_file_bytes(p_path))      # original first
-            _write(out, p_path)
+        elif apply:
+            rel = it["path"][len(_up(root)) + 1:]
+            write_file_bytes(f"{backup_root}/{rel}", read_file_bytes(it["path"]))      # original first
+            _write(out, it["path"])
             rows.append({**rec, "status": "patched", "note": f"backup: {backup_root}/{rel}"})
         else:
             rows.append({**rec, "status": "would patch", "note": "dry run (use --apply)"})

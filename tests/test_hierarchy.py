@@ -159,6 +159,23 @@ class TestHierarchy(unittest.TestCase):
         # without the 10m table the lane keeps its own value-based flag
         self.assertEqual(build_lane_1000m('roughness', src_df, 'U1').iloc[0]['breach_flag'], 0)
 
+    def test_missing_display_ids_are_generated_existing_kept(self):
+        from src.hierarchy.lane_builder import assign_missing_display_ids, max_display_seq
+
+        df = pd.DataFrame({
+            'id': ['a', 'b', 'c', 'd'], 'lane': ['L1', 'L2', 'L3', 'R1'], 'start_chainage': [0, 0, 0, 0],
+            'breach_flag': [1, 0, 1, 1],
+            'display_defect_id': ['D/201126/N/00004', None, None, ''],      # L1 has one, L2 is no breach, L3 / R1 miss it
+        })
+        self.assertEqual(max_display_seq(df), 4)
+        out, n = assign_missing_display_ids(df, '201126', 5)
+        self.assertEqual(n, 2)
+        self.assertEqual(out['display_defect_id'].tolist(),
+                         ['D/201126/N/00004', None, 'D/201126/N/00005', 'D/201126/N/00006'])
+        again, n2 = assign_missing_display_ids(out, '201126', 7)               # nothing left to generate
+        self.assertEqual(n2, 0)
+        self.assertEqual(again['display_defect_id'].tolist(), out['display_defect_id'].tolist())
+
     def test_display_defect_id_assignment(self):
         # Parent table with 1 breach
         parent_df = pd.DataFrame({
