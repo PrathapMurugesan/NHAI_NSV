@@ -51,6 +51,41 @@ class TestHierarchy(unittest.TestCase):
         self.assertEqual(row['road_condition'], 'Bad')
         self.assertEqual(row['parent_id'], 'UPC001_LHS_0_1000')
 
+    def test_side_parent_breach_follows_children(self):
+        CA, IRC = 2000.0, 2400.0
+        bi = lambda iri: 630 * iri ** 1.12
+        spikes = {('L1', 500): 3.2,      # BI ~2300: breaches CA only
+                  ('R1', 200): 3.5}      # BI ~2540: breaches CA and IRC
+        rows = []
+        for lane in ('L1', 'L2', 'R1'):
+            for st in range(0, 2000, 10):
+                iri = spikes.get((lane, st), 1.0)
+                for std, thr in (('CA', CA), ('IRC', IRC)):
+                    rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, iri_value=iri, lwp_iri=iri,
+                                     rwp_iri=iri, metric_value=bi(iri), breach_flag=int(bi(iri) >= thr),
+                                     threshold_name=f'As per {std}'))
+        src_10m = pd.DataFrame(rows)
+        src_df = pd.DataFrame([
+            dict(lane=l, start_chainage=s, end_chainage=s + 1000, metric_value=700.0, breach_flag=0,
+                 threshold_name='As per CA', length_m=1000.0, segment_count=100, pavement_type='Bituminous')
+            for l in ('L1', 'L2', 'R1') for s in (0, 1000)])
+
+        out = build_side_parent('roughness', src_df, 'U1', CA, 1000, src_10m=src_10m, irc_threshold=IRC)
+        get = lambda side, start: out[(out['side'] == side) & (out['start_chainage'] == start)].iloc[0]
+
+        lhs0 = get('LHS', 0)                      # side average is far below the limit, one 10m child breaches
+        self.assertLess(lhs0['metric_value'], CA)
+        self.assertEqual(lhs0['breach_flag'], 1)
+        self.assertEqual(lhs0['road_condition'], 'Bad')
+        self.assertGreater(lhs0['affected_length_ca'], 0)
+        self.assertEqual(lhs0['affected_length_irc'], 0)          # the child breaches CA only
+        self.assertEqual(get('LHS', 1000)['breach_flag'], 0)       # no breaching child, low average -> no breach
+        rhs0 = get('RHS', 0)
+        self.assertEqual(rhs0['breach_flag'], 1)
+        self.assertGreater(rhs0['affected_length_irc'], 0)         # IRC decided from its own 10m rows
+        self.assertEqual(rhs0['rating_irc'], 'Poor')
+        self.assertEqual(get('RHS', 1000)['breach_flag'], 0)
+
     def test_lane_1000m_builder(self):
         from src.hierarchy.lane_builder import build_lane_1000m
         from config.table_schema import enforce_table_schema, FINAL_TABLE_SCHEMAS
