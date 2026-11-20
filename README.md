@@ -182,6 +182,7 @@ The `master_<defect>_1000m_lane` tables (no pothole) have one record per lane pe
 (CA values). `breach_flag` / `affected_length_ca` are set when the lane's value is at or above the CA threshold **or any one 10m
 child of that lane in those 1000m breaches**; `affected_length_irc` (and `rating_irc` for roughness and rutting) use the IRC limit
 or an IRC 10m child breach, on the same record. The LHS / RHS parents follow the same rule per side. Processed UPCs can be brought
-up to date with `patch/patch_parent_breach.py` (see `patch/README.md`). They are numbered after the main tables, so `display_defect_id` is empty and the
-IDs of the other tables do not change.
+up to date with `patch/patch_parent_breach.py` (see `patch/README.md`). Breach rows of the lane tables get a
+`display_defect_id` continuing the UPC's counter (a row that already has one keeps it). The lane tables are numbered after the main
+tables, so the IDs of the other tables (the LHS / RHS parents and the children) do not change.
 
