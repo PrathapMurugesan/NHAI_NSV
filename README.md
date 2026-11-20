@@ -179,7 +179,9 @@ python3 -m unittest discover tests
 | 19 | `master_ravelling_1000m_lane` | 92 | `lane_1000m` | Lane-wise 1000m ravelling |
 
 The `master_<defect>_1000m_lane` tables (no pothole) have one record per lane per 1000m, from the lane-wise 1000m aggregate
-(CA values). `breach_flag` / `affected_length_ca` use the CA threshold; `affected_length_irc` (and `rating_irc` for roughness and
-rutting) use the IRC limit on the same record. They are numbered after the main tables, so `display_defect_id` is empty and the
+(CA values). `breach_flag` / `affected_length_ca` are set when the lane's value is at or above the CA threshold **or any one 10m
+child of that lane in those 1000m breaches**; `affected_length_irc` (and `rating_irc` for roughness and rutting) use the IRC limit
+or an IRC 10m child breach, on the same record. The LHS / RHS parents follow the same rule per side. Processed UPCs can be brought
+up to date with `patch/patch_parent_breach.py` (see `patch/README.md`). They are numbered after the main tables, so `display_defect_id` is empty and the
 IDs of the other tables do not change.
 

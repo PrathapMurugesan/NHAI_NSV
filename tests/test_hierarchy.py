@@ -127,6 +127,38 @@ class TestHierarchy(unittest.TestCase):
         enforced = enforce_table_schema(out, 'master_roughness_1000m_lane')
         self.assertEqual(list(enforced.columns), FINAL_TABLE_SCHEMAS['master_roughness_1000m_lane'])
 
+    def test_lane_1000m_breach_follows_children(self):
+        from src.hierarchy.lane_builder import build_lane_1000m
+
+        src_df = pd.DataFrame({
+            'lane': ['L1', 'L2', 'R1'], 'start_chainage': [0, 0, 0], 'end_chainage': [1000, 1000, 1000],
+            'metric_value': [700.0, 700.0, 700.0], 'breach_flag': [0, 0, 0],       # every lane average is below the limit
+            'threshold_name': ['As per CA'] * 3, 'length_m': [1000.0] * 3, 'road_condition': ['Good'] * 3,
+        })
+        rows = []
+        for lane in ('L1', 'L2', 'R1'):
+            for st in range(0, 1000, 10):
+                spike = (lane == 'L1' and st == 500)                                # one breaching 10m child on L1
+                for std in ('CA', 'IRC'):
+                    rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, threshold_name=f'As per {std}',
+                                     breach_flag=int(spike and std == 'CA')))     # breaches CA, not IRC
+        children = pd.DataFrame(rows)
+
+        out = build_lane_1000m('roughness', src_df, 'U1', irc_threshold=2400.0, src_10m=children)
+        get = lambda lane: out[out['lane'] == lane].iloc[0]
+        self.assertEqual(get('L1')['breach_flag'], 1)                              # a child breaches -> the lane breaches
+        self.assertEqual(get('L1')['defect_id'], 'U1_L1_0_1000')
+        self.assertEqual(get('L1')['affected_length_ca'], 1000.0)
+        self.assertEqual(get('L1')['road_condition'], 'Bad')
+        self.assertEqual(get('L1')['affected_length_irc'], 0.0)                    # the child breaches CA only
+        self.assertEqual(get('L1')['rating_irc'], 'Good')
+        self.assertEqual(get('L2')['breach_flag'], 0)                              # no breaching child, low average
+        self.assertEqual(get('L2')['road_condition'], 'Good')
+        self.assertEqual(get('R1')['breach_flag'], 0)                              # the child of L1 does not count for R1
+
+        # without the 10m table the lane keeps its own value-based flag
+        self.assertEqual(build_lane_1000m('roughness', src_df, 'U1').iloc[0]['breach_flag'], 0)
+
     def test_display_defect_id_assignment(self):
         # Parent table with 1 breach
         parent_df = pd.DataFrame({

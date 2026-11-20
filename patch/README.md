@@ -1,13 +1,17 @@
 # Patches for UPCs that are already processed
 
-## `patch_parent_breach.py` - parent breach follows the 10m children
+## `patch_parent_breach.py` - parent and lane breach follows the 10m children
 
-The extraction now flags a LHS / RHS 1000m parent (roughness, rutting) as a breach when its value is above the
-limit **or when any one 10m child of that side in those 1000m is a breach** (CA and IRC each from their own 10m
-rows). This patch applies that rule to the Silver parquets that are already in S3. The extraction is **not** run
-again - it reads `master_<defect>_parent` and `master_<defect>_child_10m` of each UPC and rewrites the parent file.
+The extraction now flags a 1000m record as a breach when its value is above the limit **or when any one 10m child
+in those 1000m is a breach** (CA and IRC each from their own 10m rows). This patch applies that rule to the Silver
+parquets that are already in S3. The extraction is **not** run again. It covers:
 
-What changes on a parent that becomes a breach (a row that is already a breach never changes):
+| Table | Children it looks at |
+|---|---|
+| `master_roughness_parent`, `master_rutting_parent` (LHS / RHS) | the 10m rows of that **side** |
+| `master_roughness_1000m_lane`, `master_rutting_1000m_lane`, `master_cracking_1000m_lane`, `master_ravelling_1000m_lane` (L1, L2, ... R1) | the 10m rows of that **lane** (`master_roughness_child_10m`, `master_rutting_child_10m`, `master_cracking_10m`, `master_ravelling_10m`) |
+
+What changes on a parent / lane record that becomes a breach (a row that is already a breach never changes):
 
 | Column | New value |
 |---|---|
@@ -16,7 +20,7 @@ What changes on a parent that becomes a breach (a row that is already a breach n
 | `road_condition` | `Bad` |
 | `affected_length_ca`, `affected_length` | the parent's `total_length` |
 | `affected_length_irc`, `rating_irc` (IRC child breach) | `total_length`, `Poor` |
-| `display_defect_id` (CA) | a new `D/<ddmmyy>/N/<n>`, continuing the UPC's counter |
+| `display_defect_id` (CA, parents only) | a new `D/<ddmmyy>/N/<n>`, continuing the UPC's counter - the lane tables have no display IDs |
 | `measures` (JSON) | `breach_ca`, `breach_from_child_ca` / `_irc`, `patched_parent_breach` |
 
 No existing display ID of any table changes, so the children and the image upload log keep their IDs. Children
@@ -45,6 +49,9 @@ python3 patch/patch_parent_breach.py --all --silver-root s3://bucket/other/Silve
   `<silver-root>/_patch_backup/parent_breach_<time>/Zone=../Phase=../Cycle=../UPC=../dlm_kpi_new/` - copy it back to undo.
 * Safe to run twice: a second run reports `unchanged`. A UPC without a parent or child table, or one that fails,
   is reported (`skipped` / `ERROR`) and never stops the others.
+* A UPC processed **before the lane tables existed** has no `master_<defect>_1000m_lane` file: the patch reports it as
+  `skipped` ("no lane table in this UPC"). The lane tables cannot be rebuilt from the saved parquets - run that UPC
+  again with the extraction to get them (they then follow the rule from the start).
 * Report per UPC and table (parents, parents turned CA / IRC breach, new IDs, status): `patch/logs/parent_breach_<time>.csv`
   and, with `--apply`, `<silver-root>/_patch_logs/parent_breach_<time>.csv`.
 * Run the dry run first and look at the numbers; UPCs processed with the new extraction code already follow the rule

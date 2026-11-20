@@ -288,7 +288,8 @@ def build_all_silver_hierarchy(
     # Lane-wise 1000m tables (L1, L2, ... instead of LHS / RHS), added after the numbering so the
     # display defect IDs of the main tables stay as they are
     for d in DEFECTS_LIN:
-        lane_df = build_lane_1000m(d, output_dfs.get(SRC_1KM[d]), upc, irc_ths.get(d), PARENT_LENGTH_M)
+        lane_df = build_lane_1000m(d, output_dfs.get(SRC_1KM[d]), upc, irc_ths.get(d), PARENT_LENGTH_M,
+                                   src_10m=output_dfs.get(SRC_10M[d]))
         if not lane_df.empty:
             new_outputs[lane_1000m_table(d)] = lane_df
     return new_outputs

@@ -7,12 +7,16 @@ ravelling (no pothole). The rows come from the lane-wise 1000m aggregate that is
 defect (CA values, as for the side parents); here they get their own identity and the IRC columns.
 
   - id / parent_id / record_id : {upc}_{lane}_{start}_{end}   (one record per lane per 1000m)
-  - breach_flag / affected_length_ca : as in the lane's 1000m aggregate (CA threshold)
-  - affected_length_irc / rating_irc : lane value >= IRC limit on the same record (no IRC row, as for the
-    side parents); rating_irc is set for roughness and rutting only
+  - breach_flag / affected_length_ca : the lane's 1000m value is at or above the CA limit OR any one 10m
+    child of that lane in those 1000m is a breach (a breaching 10m child is enough, even when the lane's
+    1000m value stays below the limit)
+  - affected_length_irc / rating_irc : lane value >= IRC limit OR any 10m 'As per IRC' child breaches, on the
+    same record (no IRC row, as for the side parents); rating_irc is set for roughness and rutting only
+  - road_condition becomes 'Bad' on a row that is a breach only because of a child
 """
 
 from typing import Optional
+import json
 import numpy as np
 import pandas as pd
 
@@ -27,14 +31,52 @@ from src.common.logger import get_logger
 logger = get_logger(__name__)
 
 
+def child_breach_lane_bins(src_10m: Optional[pd.DataFrame], threshold_name: str, parent_len_m: int) -> set:
+    """
+    {(lane, bin_start)} of the lanes that have at least one breaching 10m child in that 1000m
+    (breach_flag == 1 on a 10m row of that standard).
+    """
+    if src_10m is None or src_10m.empty or 'breach_flag' not in src_10m.columns:
+        return set()
+    df = src_10m
+    if 'threshold_name' in df.columns:
+        df = df[df['threshold_name'] == threshold_name]
+    df = df[pd.to_numeric(df['breach_flag'], errors='coerce').fillna(0).astype(int) == 1]
+    if df.empty:
+        return set()
+    lane = df['lane'].apply(normalize_lane)
+    lo = np.minimum(pd.to_numeric(df['start_chainage'], errors='coerce'),
+                    pd.to_numeric(df['end_chainage'], errors='coerce'))
+    b = np.floor(lo / parent_len_m) * parent_len_m
+    return {(ln, int(x)) for ln, x in zip(lane, b) if ln is not None and pd.notna(x)}
+
+
+def stamp_measures(raw, child_ca: bool, child_irc: bool, value_ca: bool, value_irc: bool, bf_ca: int, bf_irc: int):
+    """measures JSON of a lane record with where its breach came from (unchanged when it is not valid JSON)."""
+    try:
+        m = json.loads(raw) if isinstance(raw, str) else {}
+    except Exception:
+        return raw
+    if not isinstance(m, dict):
+        return raw
+    m.update(breach_ca=int(bf_ca), breach_irc=int(bf_irc), breach_from_value_ca=int(value_ca),
+             breach_from_child_ca=int(child_ca), breach_from_value_irc=int(value_irc),
+             breach_from_child_irc=int(child_irc))
+    return json.dumps(m)
+
+
 def build_lane_1000m(
     defect: str,
     src_df: Optional[pd.DataFrame],
     upc: str,
     irc_threshold: Optional[float] = None,
     parent_len_m: int = PARENT_LENGTH_M,
+    src_10m: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Lane-wise 1000m table of a defect from its lane-wise 1000m aggregate (empty frame when there is none)."""
+    """
+    Lane-wise 1000m table of a defect from its lane-wise 1000m aggregate (empty frame when there is none).
+    src_10m: the defect's 10m table (CA + IRC rows), for the breach that follows the children.
+    """
     table = lane_1000m_table(defect)
     if table is None or src_df is None or src_df.empty:
         return pd.DataFrame()
@@ -60,7 +102,13 @@ def build_lane_1000m(
     mv = pd.to_numeric(df.get('metric_value'), errors='coerce')
     length = pd.to_numeric(df.get('length_m'), errors='coerce')
     length = length.fillna(df['_hi'] - df['_lo'])
-    bf = pd.to_numeric(df.get('breach_flag'), errors='coerce').fillna(0).astype(int)
+    value_ca = pd.to_numeric(df.get('breach_flag'), errors='coerce').fillna(0).astype(int) == 1
+    keys = list(zip(df['lane'], b))
+    ca_hits = child_breach_lane_bins(src_10m, 'As per CA', L)
+    irc_hits = child_breach_lane_bins(src_10m, 'As per IRC', L)
+    child_ca = pd.Series([(ln, int(x)) in ca_hits for ln, x in keys], index=df.index)
+    child_irc = pd.Series([(ln, int(x)) in irc_hits for ln, x in keys], index=df.index)
+    bf = (value_ca | child_ca).astype(int)
 
     df['id'] = [f"{upc}_{table}_{ln}_{x}" for ln, x in zip(df['lane'], b)]
     df['collection_name'] = table
@@ -83,11 +131,19 @@ def build_lane_1000m(
     df['affected_length_ca'] = np.where(bf == 1, length, 0.0)
     df['affected_length'] = df['affected_length_ca']
 
-    if irc_threshold is not None:
-        bf_irc = (mv >= float(irc_threshold)).fillna(False)
+    value_irc = (mv >= float(irc_threshold)).fillna(False) if irc_threshold is not None else pd.Series(False, index=df.index)
+    bf_irc = value_irc | child_irc
+    if irc_threshold is not None or child_irc.any():
         df['affected_length_irc'] = np.where(bf_irc, length, 0.0)
         if defect in ('roughness', 'rutting'):
-            df['rating_irc'] = np.where(mv.isna(), None, np.where(bf_irc, 'Poor', 'Good'))
+            df['rating_irc'] = np.where(mv.isna() & ~bf_irc, None, np.where(bf_irc, 'Poor', 'Good'))
+
+    from_child = (bf == 1) & ~value_ca                     # breach only because of a 10m child
+    if from_child.any():
+        df.loc[from_child, 'road_condition'] = 'Bad'
+    if 'measures' in df.columns:
+        df['measures'] = [stamp_measures(m, c1, c2, v1, v2, f1, f2) for m, c1, c2, v1, v2, f1, f2 in
+                          zip(df['measures'], child_ca, child_irc, value_ca, value_irc, bf, bf_irc.astype(int))]
 
     df = df.drop(columns=['_lo', '_hi'])
     df = df.sort_values(['lane', 'start_chainage'], kind='stable').reset_index(drop=True)

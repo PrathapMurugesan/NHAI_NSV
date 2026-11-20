@@ -2,18 +2,22 @@
 """
 Patch: apply the "parent breach follows the 10m children" rule to UPCs that are already processed.
 
-Rule (same as src/hierarchy/parent_builder.py): a LHS / RHS 1000m parent of roughness and rutting is a breach
-when its value is above the limit OR when any one 10m child of that side and 1000m is a breach. CA and IRC are
-decided separately, each from its own 10m rows. The extraction is NOT run again: the patch reads the UPC's
-existing parquets, changes only the parent tables and writes them back.
+Rule (same as src/hierarchy/parent_builder.py and lane_builder.py): a LHS / RHS 1000m parent of roughness and
+rutting - and a lane's 1000m record in master_<defect>_1000m_lane (roughness, rutting, cracking, ravelling) - is a
+breach when its value is above the limit OR when any one 10m child (of that side / of that lane) in those 1000m is a
+breach. CA and IRC are decided separately, each from its own 10m rows. The extraction is NOT run again: the patch
+reads the UPC's existing parquets, changes only the parent and lane tables and writes them back.
 
 Per parent row that becomes a breach (a row that is already a breach never changes, so the patch can run twice):
     CA   breach_flag = 1, defect_id = parent_id, road_condition = 'Bad',
          affected_length_ca / affected_length = total_length, display_defect_id = new ID
     IRC  affected_length_irc = total_length, rating_irc = 'Poor'
     measures JSON gets breach_* / breach_from_child_* (and patched_parent_breach)
-New display IDs continue the UPC's counter (D/<ddmmyy>/N/<max + 1>); no existing ID of any table is changed, so
-the child rows (and the image upload log) keep their IDs.
+The same columns change on a lane record, except the display ID: the lane tables carry no display_defect_id.
+New display IDs of the parents continue the UPC's counter (D/<ddmmyy>/N/<max + 1>); no existing ID of any table is
+changed, so the child rows (and the image upload log) keep their IDs.
+A UPC processed before the lane tables existed has no master_<defect>_1000m_lane file: it is reported as skipped
+(run that UPC again to get the tables).
 
 Nothing is written unless --apply is given. With --apply every changed parquet is first copied to
 <silver-root>/_patch_backup/parent_breach_<time>/Zone=../Phase=../Cycle=../UPC=../dlm_kpi_new/ .
@@ -45,12 +49,14 @@ sys.path.insert(0, ROOT)
 import numpy as np
 import pandas as pd
 
-from src.common.constants import PARENT_LENGTH_M
+from src.common.constants import PARENT_LENGTH_M, TABLE_SPEC, lane_1000m_table, normalize_lane
 from src.common.fs_utils import list_dir, path_exists, read_file_bytes, write_file_bytes
+from src.hierarchy.lane_builder import child_breach_lane_bins
 from src.hierarchy.parent_builder import child_breach_bins
 
 DEFAULT_SILVER_ROOT = "s3://dhms-new-stgae/DHMS/NSV/Silver"
 DEFECTS = ("roughness", "rutting")             # the defects with LHS / RHS parents
+LANE_DEFECTS = ("roughness", "rutting", "cracking", "ravelling")      # the defects with a lane-wise 1000m table
 ID_RE = re.compile(r"^D/(\d{6})/N/(\d{5})(?:/\d{4})?$")
 REPORT_COLS = ["zone", "phase", "cycle", "upc", "table", "parents", "to_ca_breach", "to_irc_breach",
                "new_display_ids", "status", "note"]
@@ -151,7 +157,87 @@ def _patch_measures(raw, ca: bool, irc: bool, was_ca: bool, was_irc: bool, stamp
     return json.dumps(m)
 
 
+def _child_10m_table(defect: str) -> str:
+    return next(t for t, kind in TABLE_SPEC[defect]["children"] if kind == "10m")
+
+
+def _patch_lanes(root: str, key: Tuple[str, str, str, str], apply: bool, backup_root: str, stamp: str) -> List[Dict]:
+    """master_<defect>_1000m_lane: breach also when any 10m child of the lane in those 1000m breaches."""
+    zone, phase, cycle, upc = key
+    base = dict(zone=zone, phase=phase, cycle=cycle, upc=upc)
+    folder = f"{_up(root)}/Zone={zone}/Phase={phase}/Cycle={cycle}/UPC={upc}/dlm_kpi_new"
+    rows = []
+    for d in LANE_DEFECTS:
+        t_lane, t_child = lane_1000m_table(d), _child_10m_table(d)
+        l_path, c_path = f"{folder}/{t_lane}.parquet", f"{folder}/{t_child}.parquet"
+        if not path_exists(l_path):
+            rows.append({**base, "table": t_lane, "status": "skipped",
+                         "note": "no lane table in this UPC (processed before the lane tables existed) - run it again"})
+            continue
+        lane = _read(l_path)
+        if lane.empty:
+            rows.append({**base, "table": t_lane, "parents": 0, "status": "skipped", "note": "lane table is empty"})
+            continue
+        if not path_exists(c_path):
+            rows.append({**base, "table": t_lane, "parents": len(lane), "status": "skipped",
+                         "note": f"{t_child} not found - cannot see the children"})
+            continue
+        child = _read(c_path)
+        ca_hits = child_breach_lane_bins(child, "As per CA", PARENT_LENGTH_M)
+        irc_hits = child_breach_lane_bins(child, "As per IRC", PARENT_LENGTH_M)
+
+        bins = _parent_bin(lane)
+        lanes = lane["lane"].apply(normalize_lane)
+        child_ca = pd.Series([(ln, int(b)) in ca_hits for ln, b in zip(lanes, bins)], index=lane.index)
+        child_irc = pd.Series([(ln, int(b)) in irc_hits for ln, b in zip(lanes, bins)], index=lane.index)
+        was_ca = pd.to_numeric(lane["breach_flag"], errors="coerce").fillna(0).astype(int) == 1
+        was_irc = pd.Series(False, index=lane.index)
+        if "affected_length_irc" in lane.columns:
+            was_irc |= pd.to_numeric(lane["affected_length_irc"], errors="coerce").fillna(0) > 0
+        if "rating_irc" in lane.columns:
+            was_irc |= lane["rating_irc"].astype(str) == "Poor"
+        to_ca, to_irc = child_ca & ~was_ca, child_irc & ~was_irc
+        n_ca, n_irc = int(to_ca.sum()), int(to_irc.sum())
+        rec = {**base, "table": t_lane, "parents": len(lane), "to_ca_breach": n_ca, "to_irc_breach": n_irc,
+               "new_display_ids": 0}
+        if not (n_ca or n_irc):
+            rows.append({**rec, "status": "unchanged", "note": ""})
+            continue
+
+        out = lane.copy()
+        length = pd.to_numeric(out.get("length_m"), errors="coerce")
+        length = length.fillna((pd.to_numeric(out["end_chainage"], errors="coerce") -
+                                pd.to_numeric(out["start_chainage"], errors="coerce")).abs())
+        if n_ca:
+            out.loc[to_ca, "breach_flag"] = 1
+            out.loc[to_ca, "defect_id"] = out.loc[to_ca, "parent_id"]
+            out.loc[to_ca, "road_condition"] = "Bad"
+            out.loc[to_ca, "affected_length_ca"] = length[to_ca]
+            out.loc[to_ca, "affected_length"] = length[to_ca]
+        if n_irc:
+            out.loc[to_irc, "affected_length_irc"] = length[to_irc]
+            if d in ("roughness", "rutting"):
+                out.loc[to_irc, "rating_irc"] = "Poor"
+        if "measures" in out.columns:
+            for i in out.index[to_ca | to_irc]:
+                out.at[i, "measures"] = _patch_measures(out.at[i, "measures"], bool(to_ca[i]), bool(to_irc[i]),
+                                                        bool(was_ca[i]), bool(was_irc[i]), stamp)
+        if apply:
+            rel = l_path[len(_up(root)) + 1:]
+            write_file_bytes(f"{backup_root}/{rel}", read_file_bytes(l_path))      # original first
+            _write(out, l_path)
+            rows.append({**rec, "status": "patched", "note": f"backup: {backup_root}/{rel}"})
+        else:
+            rows.append({**rec, "status": "would patch", "note": "dry run (use --apply)"})
+    return rows
+
+
 def patch_upc(root: str, key: Tuple[str, str, str, str], apply: bool, backup_root: str, stamp: str) -> List[Dict]:
+    """Parents (LHS / RHS) and lane-wise 1000m tables of one UPC."""
+    return _patch_parents(root, key, apply, backup_root, stamp) + _patch_lanes(root, key, apply, backup_root, stamp)
+
+
+def _patch_parents(root: str, key: Tuple[str, str, str, str], apply: bool, backup_root: str, stamp: str) -> List[Dict]:
     zone, phase, cycle, upc = key
     base = dict(zone=zone, phase=phase, cycle=cycle, upc=upc)
     folder = f"{_up(root)}/Zone={zone}/Phase={phase}/Cycle={cycle}/UPC={upc}/dlm_kpi_new"
