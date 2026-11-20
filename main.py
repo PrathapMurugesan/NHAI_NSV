@@ -11,8 +11,9 @@ Usage:
 import os
 import sys
 import argparse
+import traceback
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 
 # Add project root to sys.path
@@ -76,6 +77,46 @@ from src.validation.validator import Validator
 from src.validation.validation_report import generate_validation_summary, save_validation_report
 
 logger = get_logger("dlm_pipeline")
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_batch_log_file(batch_file: str) -> str:
+    """Local log path for a batch run. Shell LOG_FILE wins when it is not an S3 URI."""
+    env_log = os.environ.get("LOG_FILE", "").strip()
+    if env_log and not env_log.startswith("s3://"):
+        log_dir = os.path.dirname(env_log)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        return env_log
+
+    logs_dir = os.path.join(PROJECT_ROOT, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(batch_file))[0]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(logs_dir, f"{stem}_{stamp}.log")
+
+
+def write_batch_summary(summary_path: str, batch_file: str, results: List[Tuple[str, str, Optional[str]]]) -> None:
+    """Write a short SUCCESS/FAIL list. Failures include the full traceback."""
+    succeeded = sum(1 for _, status, _ in results if status == "SUCCESS")
+    failed = len(results) - succeeded
+    lines = [
+        "BATCH SUMMARY",
+        f"batch_file: {batch_file}",
+        f"finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"succeeded: {succeeded}",
+        f"failed: {failed}",
+        f"total: {len(results)}",
+        "",
+    ]
+    for entry, status, error in results:
+        lines.append(f"{status}  {entry}")
+        if error:
+            lines.append(error.rstrip())
+            lines.append("")
+    os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines).rstrip() + "\n")
 
 
 def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
@@ -417,14 +458,23 @@ def main():
 
     # Load settings from CLI + .env
     base_settings = PipelineSettings.from_cli(args, env_file=args.env_file)
+    batch_log_path = None
+    summary_path = None
+    if args.batch_file and os.path.exists(args.batch_file):
+        batch_log_path = resolve_batch_log_file(args.batch_file)
+        base_settings.log_file = batch_log_path
+        summary_path = os.path.splitext(batch_log_path)[0] + "_summary.txt"
     setup_logger(level=base_settings.log_level, log_file=base_settings.log_file)
 
     if args.batch_file and os.path.exists(args.batch_file):
         with open(args.batch_file, 'r') as f:
             upcs = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        logger.info("Batch log: %s", batch_log_path)
+        logger.info("Batch summary: %s", summary_path)
         logger.info("Running batch execution for %d UPCs from %s", len(upcs), args.batch_file)
-        success_count = 0
-        for entry in upcs:
+        results: List[Tuple[str, str, Optional[str]]] = []
+        for index, entry in enumerate(upcs, start=1):
+            logger.info("SURVEY START %d/%d: %s", index, len(upcs), entry)
             try:
                 parts = entry.split()
                 if len(parts) >= 4:
@@ -446,10 +496,26 @@ def main():
                     env_file=args.env_file,
                 )
                 run_pipeline(upc_settings)
-                success_count += 1
-            except Exception as e:
-                logger.error("Failed processing survey %s: %s", entry, e, exc_info=True)
-        logger.info("Batch execution finished. Succeeded: %d / %d", success_count, len(upcs))
+                results.append((entry, "SUCCESS", None))
+                logger.info("SURVEY SUCCESS %d/%d: %s", index, len(upcs), entry)
+            except Exception:
+                error_text = traceback.format_exc()
+                results.append((entry, "FAIL", error_text))
+                logger.error("SURVEY FAILED %d/%d: %s\n%s", index, len(upcs), entry, error_text)
+        succeeded = sum(1 for _, status, _ in results if status == "SUCCESS")
+        failed = len(results) - succeeded
+        logger.info("========== BATCH SUMMARY ==========")
+        for entry, status, _ in results:
+            logger.info("%s  %s", status, entry)
+        logger.info(
+            "Batch execution finished. Succeeded: %d / %d  Failed: %d / %d",
+            succeeded, len(upcs), failed, len(upcs),
+        )
+        if summary_path:
+            write_batch_summary(summary_path, args.batch_file, results)
+            logger.info("Batch summary written to %s", summary_path)
+        if failed:
+            sys.exit(1)
     else:
         if not base_settings.upc:
             logger.error("UPC parameter is required. Specify via --upc or in .env")

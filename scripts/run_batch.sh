@@ -36,12 +36,23 @@ if [ -z "$BATCH_FILE" ]; then
     exit 1
 fi
 
+mkdir -p "$PROJECT_ROOT/logs"
+if [ -z "${LOG_FILE:-}" ] || [[ "$LOG_FILE" == s3://* ]]; then
+    STEM="$(basename "$BATCH_FILE" .txt)"
+    STAMP="$(date +%Y%m%d_%H%M%S)"
+    LOG_FILE="$PROJECT_ROOT/logs/${STEM}_${STAMP}.log"
+fi
+export LOG_FILE
+SUMMARY_FILE="${LOG_FILE%.log}_summary.txt"
+
 echo "========================================================================"
 echo "DLM Extraction Pipeline - Batch Execution"
 echo "Batch file: $BATCH_FILE"
 echo "Zone:       $ZONE | Phase: $PHASE | Cycle: $CYCLE"
 echo "Region:     $AWS_REGION | Bucket: $BUCKET"
 echo "Output:     $SILVER_S3_ROOT"
+echo "Log:        $LOG_FILE"
+echo "Summary:    $SUMMARY_FILE"
 echo "========================================================================"
 
 CMD="python3 main.py --zone \"$ZONE\" --phase \"$PHASE\" --cycle \"$CYCLE\" --batch-file \"$BATCH_FILE\""
