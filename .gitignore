@@ -47,6 +47,3 @@ env/
 *.swp
 *.swo
 .DS_Store
-
-# Patch reports
-/patch/logs/
